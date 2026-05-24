@@ -40,6 +40,12 @@ class Settings:
     host: str
     port: int
     max_batch_size: int
+    # Training trigger (/trigger-train). Both empty => endpoint returns 503.
+    training_repo: str
+    training_repo_token: str
+    training_auto_promote: bool
+    # Bound on dataset upload size (bytes). Default 100 MB.
+    max_dataset_bytes: int
 
     def bucket_for(self, category: str) -> str:
         return self.bucket_override or f"{category}-artifacts"
@@ -74,6 +80,17 @@ class Settings:
         max_batch_size = int(os.environ.get("MAX_BATCH_SIZE", "1000"))
         if max_batch_size < 1:
             raise ValueError("MAX_BATCH_SIZE must be >= 1")
+        training_repo = os.environ.get("GITHUB_TRAINING_REPO", "").strip()
+        training_repo_token = os.environ.get("GITHUB_PAT", "").strip()
+        training_auto_promote = os.environ.get("TRAINING_AUTO_PROMOTE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        max_dataset_bytes = int(os.environ.get("MAX_DATASET_BYTES", str(100 * 1024 * 1024)))
+        if max_dataset_bytes < 1:
+            raise ValueError("MAX_DATASET_BYTES must be >= 1")
         return cls(
             default_category=default_category,
             default_project=default_project,
@@ -87,4 +104,8 @@ class Settings:
             host=host,
             port=port,
             max_batch_size=max_batch_size,
+            training_repo=training_repo,
+            training_repo_token=training_repo_token,
+            training_auto_promote=training_auto_promote,
+            max_dataset_bytes=max_dataset_bytes,
         )

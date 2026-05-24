@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from .config import CATEGORY_RE, MODEL_NAME_RE, PROJECT_RE, VERSION_ID_RE, Settings
-from .layout import pointer_key, project_prefix
+from .layout import (
+    pointer_key,
+    project_prefix,
+    trigger_failure_key,
+    trigger_metadata_key,
+    trigger_running_key,
+)
 from .loader import LoadedModel, ModelCache
+from .ports.orchestration import OrchestrationAdapter
+from .ports.storage import ArtifactStore
 
 
 class PredictRequest(BaseModel):
@@ -110,6 +120,8 @@ def _resolve_target(
 def create_app(
     settings: Settings | None = None,
     cache: ModelCache | None = None,
+    writable_store: ArtifactStore | None = None,
+    orchestrator: OrchestrationAdapter | None = None,
 ) -> FastAPI:
     cfg = settings or Settings.from_env()
     model_cache = cache or ModelCache(cfg)
@@ -129,15 +141,33 @@ def create_app(
                 logger.warning(f"default preload failed; serving in lazy mode: {exc}")
         yield
 
-    app = FastAPI(title="rest_app", version="0.2.0", lifespan=_lifespan)
+    app = FastAPI(title="rest_app", version="0.3.0", lifespan=_lifespan)
     app.state.settings = cfg
     app.state.cache = model_cache
+    app.state.writable_store = writable_store  # built lazily on first /trigger-train
+    app.state.orchestrator = orchestrator  # built lazily on first /trigger-train
 
     def get_settings(request: Request) -> Settings:
         return request.app.state.settings
 
     def get_cache(request: Request) -> ModelCache:
         return request.app.state.cache
+
+    def get_writable_store(request: Request) -> ArtifactStore:
+        if request.app.state.writable_store is None:
+            from .factories import get_writable_artifact_store
+
+            request.app.state.writable_store = get_writable_artifact_store(
+                request.app.state.settings
+            )
+        return request.app.state.writable_store
+
+    def get_orchestrator(request: Request) -> OrchestrationAdapter:
+        if request.app.state.orchestrator is None:
+            from .factories import get_orchestrator as build_orchestrator
+
+            request.app.state.orchestrator = build_orchestrator(request.app.state.settings)
+        return request.app.state.orchestrator
 
     # ------------------------------------------------------------------
     # Health / readiness
@@ -467,14 +497,155 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"status": "reloaded", "version_id": loaded.version_id}
 
-    @app.post("/trigger-train", status_code=501)
-    def trigger_train() -> dict[str, str]:
+    # ------------------------------------------------------------------
+    # Training trigger
+    # ------------------------------------------------------------------
+
+    def _validate_category_project(category: str, project: str) -> None:
+        if not CATEGORY_RE.match(category):
+            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
+        if not PROJECT_RE.match(project):
+            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
+
+    def _validate_target(category: str, project: str, model_name: str) -> None:
+        _validate_category_project(category, project)
+        if not MODEL_NAME_RE.match(model_name):
+            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
+
+    @app.post("/trigger-train")
+    async def trigger_train(
+        category: str = Form(...),
+        project: str = Form(...),
+        model_name: str = Form(...),
+        model_family: str = Form(...),
+        dataset: UploadFile = File(...),
+        params: UploadFile = File(...),
+        dataset_format: str | None = Form(default=None),
+        description: str = Form(default=""),
+        requested_by: str = Form(default=""),
+        auto_promote: bool | None = Form(default=None),
+        settings: Settings = Depends(get_settings),
+        store: ArtifactStore = Depends(get_writable_store),
+        orchestrator: OrchestrationAdapter = Depends(get_orchestrator),
+        x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    ) -> dict[str, Any]:
+        """Accept dataset+params upload, write trigger folder to S3, fire training.
+
+        Auth: requires X-Admin-Token header matching APP_ADMIN_TOKEN.
+        Multipart form fields: see endpoint signature. dataset/params are file uploads.
+        Returns: {trigger_id, trigger_uri, status_url, auto_promote}.
+        """
+        _check_admin_token(settings, x_admin_token)
+        if not settings.training_repo or not settings.training_repo_token:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "training trigger not configured: set GITHUB_TRAINING_REPO + "
+                    "GITHUB_PAT in this service's environment"
+                ),
+            )
+        _validate_target(category, project, model_name)
+
+        bucket = settings.bucket_for(category)
+        effective_auto_promote = (
+            settings.training_auto_promote if auto_promote is None else auto_promote
+        )
+
+        # Stream uploads to a temp dir with size enforcement, then hand paths to publisher.
+        from .publisher import publish_trigger
+
+        with tempfile.TemporaryDirectory(prefix="trigger_") as tmpdir:
+            tmp = Path(tmpdir)
+            dataset_local = tmp / (dataset.filename or "dataset.bin")
+            params_local = tmp / (params.filename or "params.yaml")
+
+            await _save_capped(dataset, dataset_local, settings.max_dataset_bytes)
+            await _save_capped(params, params_local, 1 * 1024 * 1024)  # params.yaml: 1 MB cap
+
+            try:
+                trigger_id, trigger_uri = publish_trigger(
+                    dataset_path=dataset_local,
+                    params_path=params_local,
+                    category=category,
+                    project=project,
+                    model_name=model_name,
+                    model_family=model_family,
+                    bucket=bucket,
+                    prefix=settings.prefix,
+                    auto_promote=effective_auto_promote,
+                    store=store,
+                    orchestrator=orchestrator,
+                    description=description,
+                    requested_by=requested_by,
+                    dataset_format=dataset_format,
+                )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                # orchestrator refused — failed.json marker already written
+                raise HTTPException(status_code=502, detail=f"dispatch failed: {exc}") from exc
+
         return {
-            "status": "not_implemented",
-            "detail": "training trigger is deferred to Phase 8",
+            "trigger_id": trigger_id,
+            "trigger_uri": trigger_uri,
+            "status_url": f"/trigger-status/{trigger_id}?project={project}&category={category}",
+            "auto_promote": effective_auto_promote,
         }
 
+    @app.get("/trigger-status/{trigger_id}")
+    def trigger_status(
+        trigger_id: str,
+        project: str,
+        category: str,
+        settings: Settings = Depends(get_settings),
+        store: ArtifactStore = Depends(get_writable_store),
+    ) -> dict[str, Any]:
+        """Resolve trigger lifecycle by reading the four marker files in S3.
+
+        States: pending (only trigger.json) → running (running.json present) →
+        completed (stable pointer was updated after trigger creation) or
+        failed (failed.json present).
+        """
+        _validate_category_project(category, project)
+        bucket = settings.bucket_for(category)
+
+        # Failed wins over running wins over trigger.json existence.
+        failed = store.get_json(bucket, trigger_failure_key(settings.prefix, project, trigger_id))
+        if failed is not None:
+            return {
+                "trigger_id": trigger_id,
+                "status": "failed",
+                "reason": failed.get("reason", ""),
+            }
+        running = store.get_json(bucket, trigger_running_key(settings.prefix, project, trigger_id))
+        meta = store.get_json(bucket, trigger_metadata_key(settings.prefix, project, trigger_id))
+        if meta is None and running is None:
+            raise HTTPException(status_code=404, detail=f"no such trigger: {trigger_id}")
+        if running is not None:
+            return {"trigger_id": trigger_id, "status": "running"}
+        return {"trigger_id": trigger_id, "status": "pending"}
+
     return app
+
+
+async def _save_capped(upload: UploadFile, dest: Path, max_bytes: int) -> None:
+    """Stream UploadFile to dest, raising 413 if it exceeds max_bytes."""
+    written = 0
+    chunk_size = 1024 * 1024
+    with dest.open("wb") as fh:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"upload exceeded {max_bytes} bytes for {upload.filename}",
+                )
+            fh.write(chunk)
 
 
 _app: FastAPI | None = None
