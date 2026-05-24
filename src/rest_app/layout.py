@@ -55,3 +55,51 @@ def manifest_key(prefix: str, project: str, model_name: str, version: int | str)
 def project_prefix(prefix: str, project: str) -> str:
     """Top-level list prefix for discovery: '{prefix?}/{project}/'."""
     return _join(prefix, _check(project, PROJECT_RE, "project")) + "/"
+
+
+TRIGGER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SUPPORTED_DATASET_FORMATS: frozenset[str] = frozenset({"csv", "parquet"})
+
+
+def _check_trigger_id(trigger_id: str) -> str:
+    return _check(trigger_id, TRIGGER_ID_RE, "trigger_id")
+
+
+def _check_dataset_format(fmt: str) -> str:
+    if fmt not in SUPPORTED_DATASET_FORMATS:
+        raise ValueError(
+            f"dataset_format must be one of {sorted(SUPPORTED_DATASET_FORMATS)}; got {fmt!r}"
+        )
+    return fmt
+
+
+def trigger_root(prefix: str, project: str, trigger_id: str) -> str:
+    return _join(
+        prefix,
+        "_triggers",
+        _check(project, PROJECT_RE, "project"),
+        _check_trigger_id(trigger_id),
+    )
+
+
+def trigger_dataset_key(
+    prefix: str, project: str, trigger_id: str, dataset_format: str = "parquet"
+) -> str:
+    fmt = _check_dataset_format(dataset_format)
+    return f"{trigger_root(prefix, project, trigger_id)}/dataset.{fmt}"
+
+
+def trigger_params_key(prefix: str, project: str, trigger_id: str) -> str:
+    return f"{trigger_root(prefix, project, trigger_id)}/params.yaml"
+
+
+def trigger_metadata_key(prefix: str, project: str, trigger_id: str) -> str:
+    return f"{trigger_root(prefix, project, trigger_id)}/trigger.json"
+
+
+def trigger_running_key(prefix: str, project: str, trigger_id: str) -> str:
+    return f"{trigger_root(prefix, project, trigger_id)}/running.json"
+
+
+def trigger_failure_key(prefix: str, project: str, trigger_id: str) -> str:
+    return f"{trigger_root(prefix, project, trigger_id)}/failed.json"

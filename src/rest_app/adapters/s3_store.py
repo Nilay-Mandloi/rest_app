@@ -1,5 +1,5 @@
-"""S3 implementation of ReadOnlyArtifactStore. The only file in this package
-that imports boto3.
+"""S3 implementation of ArtifactStore. The only file in this package that
+imports boto3.
 
 The gateway resolves models for multiple tenants, so each port method takes
 ``bucket`` explicitly rather than baking it into the adapter."""
@@ -14,7 +14,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from rest_app.ports.storage import ReadOnlyArtifactStore
+from rest_app.ports.storage import ArtifactStore, ReadOnlyArtifactStore
 
 
 class S3ReadStore(ReadOnlyArtifactStore):
@@ -51,3 +51,41 @@ class S3ReadStore(ReadOnlyArtifactStore):
                 if not key_dir:
                     continue
                 yield key_dir.rsplit("/", 1)[-1]
+
+
+class S3Store(S3ReadStore, ArtifactStore):
+    """Read+write S3 store. Used by the trigger path; the prediction path
+    only needs the read-only parent."""
+
+    def upload_file(
+        self,
+        bucket: str,
+        local_path: Path | str,
+        logical_key: str,
+        *,
+        content_type: str | None = None,
+    ) -> None:
+        extra: dict[str, Any] = {}
+        if content_type:
+            extra["ContentType"] = content_type
+        self._client.upload_file(str(local_path), bucket, logical_key, ExtraArgs=extra or None)
+
+    def put_bytes(
+        self,
+        bucket: str,
+        data: bytes,
+        logical_key: str,
+        *,
+        content_type: str | None = None,
+    ) -> None:
+        kwargs: dict[str, Any] = {"Bucket": bucket, "Key": logical_key, "Body": data}
+        if content_type:
+            kwargs["ContentType"] = content_type
+        self._client.put_object(**kwargs)
+
+    def delete(self, bucket: str, logical_key: str) -> None:
+        try:
+            self._client.delete_object(Bucket=bucket, Key=logical_key)
+        except ClientError:
+            # Best-effort cleanup — surface only via caller's logger
+            pass
