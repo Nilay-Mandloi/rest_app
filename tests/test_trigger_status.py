@@ -6,9 +6,9 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+
 from rest_app.app import create_app
 from rest_app.config import Settings
-
 from tests.test_publisher import CapturingOrchestrator, FakeStore
 
 

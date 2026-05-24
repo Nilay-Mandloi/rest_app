@@ -40,6 +40,9 @@ select = ["E", "F", "I", "B", "UP", "N", "W"]
 # N803/N806: uppercase X for feature matrices (sklearn convention).
 ignore = ["B008", "N803", "N806"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["rest_app"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

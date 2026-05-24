@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import boto3
 import pytest
 from moto import mock_aws
+
 from rest_app.adapters.s3_store import S3ReadStore
 from rest_app.config import Settings
 from rest_app.loader import ModelCache

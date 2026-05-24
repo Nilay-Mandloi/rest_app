@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from rest_app.ports.orchestration import OrchestrationAdapter
 from rest_app.ports.storage import ArtifactStore
 from rest_app.publisher import publish_trigger

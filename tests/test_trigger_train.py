@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+
 from rest_app.app import create_app
 from rest_app.config import Settings
 from rest_app.ports.orchestration import OrchestrationAdapter
 from rest_app.ports.storage import ArtifactStore
-
 from tests.test_publisher import CapturingOrchestrator, FakeStore
 
 
