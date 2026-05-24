@@ -37,7 +37,8 @@ when serving many distinct projects/models from one instance.
 | GET    | `/cache`                                      | Admin: list cached entries. |
 | POST   | `/cache/clear`                                | Admin: nuke the cache. |
 | POST   | `/reload`                                     | Admin: evict + reload one target. Query params same as `/model/info`. |
-| POST   | `/trigger-train`                              | 501 — deferred to Phase 8. |
+| POST   | `/trigger-train`                              | Multipart upload (dataset + params.yaml). Writes trigger folder to S3, fires GitHub Actions training. Admin-token guarded. |
+| GET    | `/trigger-status/{trigger_id}`                | Query: `?project=&category=`. Returns `pending | running | completed | failed`. |
 
 ### `/predict` request body
 
@@ -57,6 +58,46 @@ service skips reading the pointer and goes straight to the requested artifact.
 If `channel` is set (or both are omitted), the service reads
 `{project}/{model_name}/{channel}.json` to resolve the current version.
 
+### `/trigger-train` (multipart)
+
+The user uploads a dataset and a params.yaml in a single request. The service
+writes the trigger folder to S3 in the canonical order (dataset → params →
+trigger.json **last**) and fires a `train-model` `repository_dispatch` event
+on the configured GitHub training repo. Requires `X-Admin-Token` header.
+
+```bash
+curl -X POST http://localhost:8000/trigger-train \
+  -H "X-Admin-Token: $APP_ADMIN_TOKEN" \
+  -F category=mlops \
+  -F project=product_dq \
+  -F model_name=sentiment_analysis \
+  -F model_family=lgbm \
+  -F dataset=@my_data.parquet \
+  -F params=@params.yaml
+```
+
+Response:
+
+```json
+{
+  "trigger_id": "20260525T143012Z_a1b2c3d4",
+  "trigger_uri": "s3://mlops-artifacts/_triggers/product_dq/20260525T143012Z_a1b2c3d4/",
+  "status_url": "/trigger-status/20260525T143012Z_a1b2c3d4?project=product_dq&category=mlops",
+  "auto_promote": false
+}
+```
+
+Poll `status_url` to watch the run progress:
+
+```bash
+curl "http://localhost:8000/trigger-status/20260525T143012Z_a1b2c3d4?project=product_dq&category=mlops"
+# {"trigger_id": "...", "status": "pending"}    ← waiting for CI to start
+# {"trigger_id": "...", "status": "running"}    ← CI is training
+# {"trigger_id": "...", "status": "failed", "reason": "..."}
+```
+
+Returns `503` if `GITHUB_TRAINING_REPO` + `GITHUB_PAT` aren't both set.
+
 ## AWS credentials
 
 The service uses **AWS env-var auth** through boto3's default credential chain:
@@ -75,6 +116,16 @@ See [`.env.example`](.env.example) for the full env-var list. The three
 `DEFAULT_*` vars are optional — leave them blank to run as a pure
 multi-model gateway where callers always supply the target in the request
 body.
+
+### Required env vars for `/trigger-train`
+
+| Var | Purpose |
+|---|---|
+| `GITHUB_TRAINING_REPO` | `org/repo` of the training repo to dispatch to (e.g. `prescienceds/mlops`). |
+| `GITHUB_PAT` | Fine-grained PAT with `contents: read` + `actions: write` on the training repo. |
+| `APP_ADMIN_TOKEN` | Shared bearer guarding the endpoint (sent via `X-Admin-Token` header). |
+| `MAX_DATASET_BYTES` | Optional; defaults to 100 MB. |
+| `TRAINING_AUTO_PROMOTE` | Optional; `1`/`true` to auto-promote after training. Default `false`. |
 
 ## Local run
 
