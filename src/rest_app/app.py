@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -21,6 +23,8 @@ from .layout import (
 from .loader import LoadedModel, ModelCache
 from .ports.orchestration import OrchestrationAdapter
 from .ports.storage import ArtifactStore
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 class PredictRequest(BaseModel):
@@ -141,11 +145,19 @@ def create_app(
                 logger.warning(f"default preload failed; serving in lazy mode: {exc}")
         yield
 
-    app = FastAPI(title="rest_app", version="0.3.0", lifespan=_lifespan)
+    app = FastAPI(title="rest_app", version="0.4.0", lifespan=_lifespan)
     app.state.settings = cfg
     app.state.cache = model_cache
     app.state.writable_store = writable_store  # built lazily on first /trigger-train
     app.state.orchestrator = orchestrator  # built lazily on first /trigger-train
+
+    # Serve the trigger.html admin form at /static/trigger.html, root redirects to it.
+    if _STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+        @app.get("/", include_in_schema=False)
+        def _root() -> RedirectResponse:
+            return RedirectResponse(url="/static/trigger.html", status_code=302)
 
     def get_settings(request: Request) -> Settings:
         return request.app.state.settings

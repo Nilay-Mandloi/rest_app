@@ -28,6 +28,9 @@ when serving many distinct projects/models from one instance.
 
 | Method | Path                                          | Notes |
 |--------|-----------------------------------------------|-------|
+| GET    | `/`                                           | Redirects to `/static/trigger.html` — the admin UI for triggering training runs. |
+| GET    | `/static/trigger.html`                        | Single-page HTML form to upload dataset + params.yaml and watch trigger status live. Uses the same `X-Admin-Token` as the API. |
+| GET    | `/docs`                                       | FastAPI-generated Swagger UI for the full API. |
 | GET    | `/health`                                     | Liveness, no S3 dependency. |
 | GET    | `/ready`                                      | Returns the number of cached models. |
 | GET    | `/model/info`                                 | Query: `?category=&project=&model_name=&version|channel=`. Loads into cache if needed. |

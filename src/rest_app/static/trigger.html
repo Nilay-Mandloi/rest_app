@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rest_app — Trigger training</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --border: #e3e6ea;
+      --text: #1f2328;
+      --muted: #6e7681;
+      --accent: #0969da;
+      --accent-hover: #0860c7;
+      --ok: #1a7f37;
+      --err: #cf222e;
+      --warn: #9a6700;
+      --code-bg: #f0f2f5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      margin: 0; padding: 32px 16px;
+    }
+    .wrap { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 24px; margin-bottom: 16px;
+    }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+    input[type=text], input[type=password], select, textarea {
+      width: 100%; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 6px;
+      font-size: 14px; font-family: inherit; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+    input[type=file] { font-size: 13px; padding: 6px 0; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+    button {
+      background: var(--accent); color: white; border: 0;
+      padding: 10px 20px; font-size: 14px; font-weight: 600;
+      border-radius: 6px; cursor: pointer;
+      margin-top: 16px;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { background: #8c959f; cursor: not-allowed; }
+    .result { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+    .result pre {
+      background: var(--code-bg); padding: 12px; border-radius: 6px;
+      overflow-x: auto; margin: 8px 0; white-space: pre-wrap; word-break: break-all;
+    }
+    .status { font-weight: 600; }
+    .status.pending  { color: var(--warn); }
+    .status.running  { color: var(--accent); }
+    .status.failed   { color: var(--err); }
+    .status.completed{ color: var(--ok); }
+    .error { color: var(--err); margin-top: 12px; font-size: 14px; }
+    .token-row { display: flex; gap: 8px; align-items: end; }
+    .token-row input { flex: 1; }
+    .token-row button { margin: 0; padding: 8px 12px; font-size: 12px; background: #eee; color: #333; }
+    .token-row button:hover { background: #ddd; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Trigger a training run</h1>
+    <p class="sub">
+      Uploads <code>dataset</code> + <code>params.yaml</code> to S3 and fires the
+      <code>mlops</code> training workflow. See <a href="/docs" target="_blank">/docs</a> for the raw API.
+    </p>
+
+    <div class="card">
+      <form id="form">
+        <label for="token">Admin token</label>
+        <div class="token-row">
+          <input type="password" id="token" name="token" required autocomplete="current-password" />
+          <button type="button" id="toggle-token">Show</button>
+        </div>
+        <p class="hint">Stored in this browser only (localStorage). The server reads it from the <code>X-Admin-Token</code> header.</p>
+
+        <div class="row">
+          <div>
+            <label for="category">Category</label>
+            <input type="text" id="category" name="category" required value="mlops"
+                   pattern="^[a-z][a-z0-9_-]{0,30}$" />
+          </div>
+          <div>
+            <label for="model_family">Model family</label>
+            <select id="model_family" name="model_family" required>
+              <option value="regression">regression</option>
+              <option value="classification">classification</option>
+              <option value="forecasting">forecasting</option>
+              <option value="clustering">clustering</option>
+              <option value="ranking">ranking</option>
+              <option value="nlp">nlp</option>
+              <option value="vision">vision</option>
+              <option value="other">other</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="project">Project</label>
+            <input type="text" id="project" name="project" required
+                   pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="product_dq" />
+          </div>
+          <div>
+            <label for="model_name">Model name</label>
+            <input type="text" id="model_name" name="model_name" required
+                   pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="sentiment_analysis" />
+          </div>
+        </div>
+
+        <label for="dataset">Dataset file (.parquet or .csv)</label>
+        <input type="file" id="dataset" name="dataset" required accept=".parquet,.csv,.pq" />
+
+        <label for="params">params.yaml</label>
+        <input type="file" id="params" name="params" required accept=".yaml,.yml" />
+
+        <label for="description">Description (optional)</label>
+        <input type="text" id="description" name="description" maxlength="200" />
+
+        <button type="submit" id="submit">Trigger training</button>
+      </form>
+
+      <div id="error" class="error" hidden></div>
+    </div>
+
+    <div id="result-card" class="card" hidden>
+      <h3 style="margin: 0 0 12px;">Result</h3>
+      <div class="result">
+        <div>trigger_id: <code id="r-trigger-id"></code></div>
+        <div style="margin-top: 6px;">status: <span id="r-status" class="status">—</span></div>
+        <div style="margin-top: 6px;">trigger_uri:</div>
+        <pre id="r-uri"></pre>
+        <div id="r-reason" class="error" hidden></div>
+        <div id="r-actions" style="margin-top: 12px;" hidden>
+          <a id="r-mlflow-link" href="#" target="_blank">View MLflow runs →</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN_KEY = 'rest_app_admin_token';
+    const FORM_FIELDS = ['category', 'project', 'model_name', 'model_family', 'description'];
+    const REMEMBER_PREFIX = 'rest_app_field_';
+
+    const tokenInput = document.getElementById('token');
+    const toggleBtn = document.getElementById('toggle-token');
+    const form = document.getElementById('form');
+    const errorEl = document.getElementById('error');
+    const submitBtn = document.getElementById('submit');
+    const resultCard = document.getElementById('result-card');
+    const rTriggerId = document.getElementById('r-trigger-id');
+    const rStatus = document.getElementById('r-status');
+    const rUri = document.getElementById('r-uri');
+    const rReason = document.getElementById('r-reason');
+
+    // Restore token + last form values
+    tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+    for (const name of FORM_FIELDS) {
+      const saved = localStorage.getItem(REMEMBER_PREFIX + name);
+      if (saved) form.elements[name].value = saved;
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      tokenInput.type = tokenInput.type === 'password' ? 'text' : 'password';
+      toggleBtn.textContent = tokenInput.type === 'password' ? 'Show' : 'Hide';
+    });
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+    }
+    function clearError() { errorEl.hidden = true; errorEl.textContent = ''; }
+    function setStatus(s, reason) {
+      rStatus.textContent = s;
+      rStatus.className = 'status ' + s;
+      if (reason) { rReason.textContent = 'reason: ' + reason; rReason.hidden = false; }
+      else { rReason.hidden = true; }
+    }
+
+    let pollHandle = null;
+    function stopPolling() {
+      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+    }
+
+    async function pollStatus(triggerId, category, project, token) {
+      const url = `/trigger-status/${encodeURIComponent(triggerId)}?` +
+                  `project=${encodeURIComponent(project)}&category=${encodeURIComponent(category)}`;
+      try {
+        const r = await fetch(url, { headers: { 'X-Admin-Token': token } });
+        if (r.status === 404) {
+          // Not yet visible — keep polling
+          return;
+        }
+        if (!r.ok) {
+          setStatus('failed', `status endpoint returned HTTP ${r.status}`);
+          stopPolling();
+          return;
+        }
+        const body = await r.json();
+        setStatus(body.status, body.reason);
+        if (body.status === 'failed' || body.status === 'completed') {
+          stopPolling();
+        }
+      } catch (e) {
+        // Network blip — keep trying
+        console.warn('poll failed:', e);
+      }
+    }
+
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      clearError();
+      stopPolling();
+      resultCard.hidden = true;
+
+      const token = tokenInput.value.trim();
+      if (!token) { showError('Admin token required.'); return; }
+      localStorage.setItem(TOKEN_KEY, token);
+      for (const name of FORM_FIELDS) {
+        localStorage.setItem(REMEMBER_PREFIX + name, form.elements[name].value);
+      }
+
+      const fd = new FormData(form);
+      fd.delete('token');  // do NOT send the token as a form field
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Uploading…';
+
+      try {
+        const r = await fetch('/trigger-train', {
+          method: 'POST',
+          headers: { 'X-Admin-Token': token },
+          body: fd,
+        });
+        const body = await r.json().catch(() => ({}));
+
+        if (!r.ok) {
+          showError(`HTTP ${r.status}: ${body.detail || r.statusText}`);
+          return;
+        }
+
+        resultCard.hidden = false;
+        rTriggerId.textContent = body.trigger_id;
+        rUri.textContent = body.trigger_uri;
+        setStatus('pending');
+
+        const category = fd.get('category');
+        const project = fd.get('project');
+        // Poll once now, then every 5 s
+        pollStatus(body.trigger_id, category, project, token);
+        pollHandle = setInterval(
+          () => pollStatus(body.trigger_id, category, project, token),
+          5000,
+        );
+        // Hard-stop after 60 minutes so we don't poll forever on a hung run
+        setTimeout(stopPolling, 60 * 60 * 1000);
+      } catch (e) {
+        showError('Request failed: ' + (e?.message || e));
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Trigger training';
+      }
+    });
+  </script>
+</body>
+</html>
