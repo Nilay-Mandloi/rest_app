@@ -218,6 +218,43 @@ def test_publish_trigger_with_prefix(trigger_files):
     assert all(k.startswith("prod/_triggers/") for k in keys)
 
 
+def test_published_trigger_json_uris_have_single_prefix(trigger_files):
+    """Regression — _full_uri must not double-prepend the prefix that
+    trigger_*_key() already includes. If this fails, the training-side
+    puller will 404 because dataset_uri in trigger.json points to
+    s3://bucket/prod/prod/_triggers/... instead of s3://bucket/prod/_triggers/."""
+    dataset, params = trigger_files
+    store = FakeStore()
+    orch = CapturingOrchestrator()
+
+    publish_trigger(
+        dataset_path=dataset,
+        params_path=params,
+        category="mlops",
+        project="product_dq",
+        model_name="sentiment_analysis",
+        model_family="forecasting",
+        bucket="mlops-artifacts",
+        prefix="prod",
+        auto_promote=False,
+        store=store,
+        orchestrator=orch,
+    )
+
+    trigger_json_blob = next(
+        v for (_b, k), v in store.objects.items() if k.endswith("trigger.json")
+    )
+    payload = json.loads(trigger_json_blob)
+    # Single 'prod/' segment, not 'prod/prod/'
+    assert "/prod/prod/" not in payload["dataset_uri"]
+    assert "/prod/prod/" not in payload["params_uri"]
+    assert payload["dataset_uri"].startswith("s3://mlops-artifacts/prod/_triggers/product_dq/")
+    assert payload["params_uri"].startswith("s3://mlops-artifacts/prod/_triggers/product_dq/")
+    # And the dataset_uri must point at a key that actually exists in the store
+    uploaded_key = payload["dataset_uri"].removeprefix("s3://mlops-artifacts/")
+    assert ("mlops-artifacts", uploaded_key) in store.objects
+
+
 def test_publish_trigger_forwards_auto_promote_to_orchestrator(trigger_files):
     dataset, params = trigger_files
     store = FakeStore()

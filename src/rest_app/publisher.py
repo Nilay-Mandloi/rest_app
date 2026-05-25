@@ -48,10 +48,14 @@ def _infer_dataset_format(dataset_path: Path, override: str | None) -> str:
     return fmt
 
 
-def _full_uri(bucket: str, prefix: str, logical_key: str) -> str:
-    prefix = prefix.strip("/")
-    key = f"{prefix}/{logical_key}" if prefix else logical_key
-    return f"s3://{bucket}/{key}"
+def _full_uri(bucket: str, logical_key: str) -> str:
+    """Build a fully-qualified s3:// URI for a logical key.
+
+    The logical_key returned by layout helpers (trigger_*_key, pointer_key, ...)
+    already includes the ARTIFACT_STORE_PREFIX. Do NOT prepend prefix again here
+    or trigger.json will record a doubled-prefix URI that the puller 404s on.
+    """
+    return f"s3://{bucket}/{logical_key}"
 
 
 def publish_trigger(
@@ -98,8 +102,8 @@ def publish_trigger(
         project=project,
         model_name=model_name,
         model_family=model_family,
-        dataset_uri=_full_uri(bucket, prefix, dataset_key),
-        params_uri=_full_uri(bucket, prefix, params_key),
+        dataset_uri=_full_uri(bucket, dataset_key),
+        params_uri=_full_uri(bucket, params_key),
         dataset_format=fmt,
         requested_by=requested_by,
         description=description,
