@@ -28,8 +28,8 @@ when serving many distinct projects/models from one instance.
 
 | Method | Path                                          | Notes |
 |--------|-----------------------------------------------|-------|
-| GET    | `/`                                           | Redirects to `/static/trigger.html` — the admin UI for triggering training runs. |
-| GET    | `/static/trigger.html`                        | Single-page HTML form to upload dataset + params.yaml and watch trigger status live. Uses the same `X-Admin-Token` as the API. |
+| GET    | `/`                                           | Redirects to `/static/trigger.html` — the admin UI. |
+| GET    | `/static/trigger.html`                        | Single-page admin UI with two tabs: **Trigger** (upload dataset + params, fire training, watch live status) and **Predict** (load any model by `(category, project, model_name)` + channel/version, see schema, enter features, run a prediction). Uses the same `X-Admin-Token` as the API. |
 | GET    | `/docs`                                       | FastAPI-generated Swagger UI for the full API. |
 | GET    | `/health`                                     | Liveness, no S3 dependency. |
 | GET    | `/ready`                                      | Returns the number of cached models. |

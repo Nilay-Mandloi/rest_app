@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>rest_app — Trigger training</title>
+  <title>rest_app — Admin</title>
   <style>
     :root {
       --bg: #f6f7f9;
@@ -17,6 +17,8 @@
       --err: #cf222e;
       --warn: #9a6700;
       --code-bg: #f0f2f5;
+      --tab-active: #ffffff;
+      --tab-inactive: #eef0f2;
     }
     * { box-sizing: border-box; }
     body {
@@ -24,31 +26,39 @@
       background: var(--bg); color: var(--text);
       margin: 0; padding: 32px 16px;
     }
-    .wrap { max-width: 640px; margin: 0 auto; }
+    .wrap { max-width: 720px; margin: 0 auto; }
     h1 { font-size: 22px; margin: 0 0 4px; }
-    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+    h3 { margin: 0 0 12px; font-size: 15px; }
+
     .card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: 8px; padding: 24px; margin-bottom: 16px;
+      border-radius: 8px; padding: 20px; margin-bottom: 16px;
     }
+    .token-card { padding: 16px 20px; }
+
     label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
-    input[type=text], input[type=password], select, textarea {
+    input[type=text], input[type=password], input[type=number], select, textarea {
       width: 100%; padding: 8px 10px;
       border: 1px solid var(--border); border-radius: 6px;
       font-size: 14px; font-family: inherit; background: #fff;
     }
+    textarea { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; min-height: 80px; }
     input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
     input[type=file] { font-size: 13px; padding: 6px 0; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
     .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
     button {
       background: var(--accent); color: white; border: 0;
       padding: 10px 20px; font-size: 14px; font-weight: 600;
-      border-radius: 6px; cursor: pointer;
-      margin-top: 16px;
+      border-radius: 6px; cursor: pointer; margin-top: 16px;
     }
     button:hover { background: var(--accent-hover); }
     button:disabled { background: #8c959f; cursor: not-allowed; }
+    button.secondary { background: #eef0f2; color: var(--text); }
+    button.secondary:hover { background: #dde1e5; }
+
     .result { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
     .result pre {
       background: var(--code-bg); padding: 12px; border-radius: 6px;
@@ -60,183 +70,314 @@
     .status.failed   { color: var(--err); }
     .status.completed{ color: var(--ok); }
     .error { color: var(--err); margin-top: 12px; font-size: 14px; }
+
     .token-row { display: flex; gap: 8px; align-items: end; }
     .token-row input { flex: 1; }
     .token-row button { margin: 0; padding: 8px 12px; font-size: 12px; background: #eee; color: #333; }
     .token-row button:hover { background: #ddd; }
     a { color: var(--accent); }
+
+    /* Tabs */
+    .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: -1px; }
+    .tab {
+      padding: 10px 18px; cursor: pointer; font-size: 14px; font-weight: 600;
+      background: var(--tab-inactive); border: 1px solid var(--border); border-bottom: none;
+      border-radius: 8px 8px 0 0; margin-right: 4px; color: var(--muted);
+    }
+    .tab.active { background: var(--tab-active); color: var(--text); }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .panel .card:first-child { border-top-left-radius: 0; }
+
+    .feature-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 8px 12px; align-items: center; margin-top: 8px; }
+    .feature-grid label { margin: 0; font-weight: 500; font-size: 13px; }
+    .feature-grid input { margin: 0; }
+    .prediction-big { font-size: 24px; font-weight: 700; color: var(--accent); padding: 12px 0; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Trigger a training run</h1>
+    <h1>rest_app admin</h1>
     <p class="sub">
-      Uploads <code>dataset</code> + <code>params.yaml</code> to S3 and fires the
-      <code>mlops</code> training workflow. See <a href="/docs" target="_blank">/docs</a> for the raw API.
+      Trigger training runs, browse models, run predictions. Raw API at
+      <a href="/docs" target="_blank">/docs</a>.
     </p>
 
-    <div class="card">
-      <form id="form">
-        <label for="token">Admin token</label>
-        <div class="token-row">
-          <input type="password" id="token" name="token" required autocomplete="current-password" />
-          <button type="button" id="toggle-token">Show</button>
-        </div>
-        <p class="hint">Stored in this browser only (localStorage). The server reads it from the <code>X-Admin-Token</code> header.</p>
-
-        <div class="row">
-          <div>
-            <label for="category">Category</label>
-            <input type="text" id="category" name="category" required value="mlops"
-                   pattern="^[a-z][a-z0-9_-]{0,30}$" />
-          </div>
-          <div>
-            <label for="model_family">Model family</label>
-            <select id="model_family" name="model_family" required>
-              <option value="regression">regression</option>
-              <option value="classification">classification</option>
-              <option value="forecasting">forecasting</option>
-              <option value="clustering">clustering</option>
-              <option value="ranking">ranking</option>
-              <option value="nlp">nlp</option>
-              <option value="vision">vision</option>
-              <option value="other">other</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="row">
-          <div>
-            <label for="project">Project</label>
-            <input type="text" id="project" name="project" required
-                   pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="product_dq" />
-          </div>
-          <div>
-            <label for="model_name">Model name</label>
-            <input type="text" id="model_name" name="model_name" required
-                   pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="sentiment_analysis" />
-          </div>
-        </div>
-
-        <label for="dataset">Dataset file (.parquet or .csv)</label>
-        <input type="file" id="dataset" name="dataset" required accept=".parquet,.csv,.pq" />
-
-        <label for="params">params.yaml</label>
-        <input type="file" id="params" name="params" required accept=".yaml,.yml" />
-
-        <label for="description">Description (optional)</label>
-        <input type="text" id="description" name="description" maxlength="200" />
-
-        <button type="submit" id="submit">Trigger training</button>
-      </form>
-
-      <div id="error" class="error" hidden></div>
+    <div class="card token-card">
+      <label for="token">Admin token (used by /trigger-train; /predict is open)</label>
+      <div class="token-row">
+        <input type="password" id="token" name="token" autocomplete="current-password" />
+        <button type="button" id="toggle-token">Show</button>
+      </div>
+      <p class="hint">Stored in this browser only (localStorage). Sent as <code>X-Admin-Token</code> for admin endpoints.</p>
     </div>
 
-    <div id="result-card" class="card" hidden>
-      <h3 style="margin: 0 0 12px;">Result</h3>
-      <div class="result">
-        <div>trigger_id: <code id="r-trigger-id"></code></div>
-        <div style="margin-top: 6px;">status: <span id="r-status" class="status">—</span></div>
-        <div style="margin-top: 6px;">trigger_uri:</div>
-        <pre id="r-uri"></pre>
-        <div id="r-reason" class="error" hidden></div>
-        <div id="r-actions" style="margin-top: 12px;" hidden>
-          <a id="r-mlflow-link" href="#" target="_blank">View MLflow runs →</a>
+    <div class="tabs">
+      <div class="tab active" data-tab="trigger">Trigger training</div>
+      <div class="tab" data-tab="predict">Predict</div>
+    </div>
+
+    <!-- ============================== TRIGGER TAB ============================== -->
+    <div class="panel active" id="panel-trigger">
+      <div class="card">
+        <form id="trigger-form">
+          <div class="row">
+            <div>
+              <label for="t-category">Category</label>
+              <input type="text" id="t-category" name="category" required value="mlops"
+                     pattern="^[a-z][a-z0-9_-]{0,30}$" />
+            </div>
+            <div>
+              <label for="t-model_family">Model family</label>
+              <select id="t-model_family" name="model_family" required>
+                <option value="regression">regression</option>
+                <option value="classification">classification</option>
+                <option value="forecasting">forecasting</option>
+                <option value="clustering">clustering</option>
+                <option value="ranking">ranking</option>
+                <option value="nlp">nlp</option>
+                <option value="vision">vision</option>
+                <option value="other">other</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="t-project">Project</label>
+              <input type="text" id="t-project" name="project" required
+                     pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="product_dq" />
+            </div>
+            <div>
+              <label for="t-model_name">Model name</label>
+              <input type="text" id="t-model_name" name="model_name" required
+                     pattern="^[a-z0-9][a-z0-9_-]{0,62}$" placeholder="sentiment_analysis" />
+            </div>
+          </div>
+
+          <label for="t-dataset">Dataset (.parquet / .csv)</label>
+          <input type="file" id="t-dataset" name="dataset" required accept=".parquet,.csv,.pq" />
+
+          <label for="t-params">params.yaml</label>
+          <input type="file" id="t-params" name="params" required accept=".yaml,.yml" />
+
+          <label for="t-description">Description (optional)</label>
+          <input type="text" id="t-description" name="description" maxlength="200" />
+
+          <button type="submit" id="t-submit">Trigger training</button>
+        </form>
+        <div id="t-error" class="error" hidden></div>
+      </div>
+
+      <div id="t-result-card" class="card" hidden>
+        <h3>Result</h3>
+        <div class="result">
+          <div>trigger_id: <code id="t-r-trigger-id"></code></div>
+          <div style="margin-top: 6px;">status: <span id="t-r-status" class="status">—</span></div>
+          <div style="margin-top: 6px;">trigger_uri:</div>
+          <pre id="t-r-uri"></pre>
+          <div id="t-r-reason" class="error" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================== PREDICT TAB ============================== -->
+    <div class="panel" id="panel-predict">
+      <div class="card">
+        <h3>Step 1 — Pick a model</h3>
+        <div class="row3">
+          <div>
+            <label for="p-category">Category</label>
+            <input type="text" id="p-category" required value="mlops" />
+          </div>
+          <div>
+            <label for="p-project">Project</label>
+            <input type="text" id="p-project" required placeholder="product_dq" />
+          </div>
+          <div>
+            <label for="p-model_name">Model name</label>
+            <input type="text" id="p-model_name" required placeholder="sentiment_analysis" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="p-channel">Channel</label>
+            <select id="p-channel">
+              <option value="stable" selected>stable</option>
+              <option value="latest">latest</option>
+              <option value="canary">canary</option>
+              <option value="shadow">shadow</option>
+              <option value="">(use explicit version)</option>
+            </select>
+          </div>
+          <div>
+            <label for="p-version">Or explicit version (overrides channel)</label>
+            <input type="text" id="p-version" placeholder="v3" pattern="^v[1-9][0-9]*$" />
+          </div>
+        </div>
+
+        <button type="button" id="p-load">Load model schema</button>
+        <button type="button" id="p-clear" class="secondary">Clear cached form</button>
+        <div id="p-info-error" class="error" hidden></div>
+      </div>
+
+      <div id="p-info-card" class="card" hidden>
+        <h3>Step 2 — Model info</h3>
+        <div class="result">
+          <div>version: <code id="p-i-version"></code></div>
+          <div>run_id: <code id="p-i-run-id"></code></div>
+          <div>model_type: <code id="p-i-type"></code></div>
+          <div id="p-i-mlflow-row" hidden>MLflow: <a id="p-i-mlflow" href="#" target="_blank">open run</a></div>
+          <div style="margin-top: 6px;">feature_columns:</div>
+          <pre id="p-i-features"></pre>
+        </div>
+      </div>
+
+      <div id="p-features-card" class="card" hidden>
+        <h3>Step 3 — Enter features</h3>
+        <p class="hint" id="p-features-hint"></p>
+        <div id="p-features-form" class="feature-grid"></div>
+
+        <div id="p-raw-json-wrap" style="margin-top: 12px;" hidden>
+          <label for="p-raw-json">No schema_contract — paste features as JSON</label>
+          <textarea id="p-raw-json" placeholder='{"a": 1.0, "b": 2.0}'></textarea>
+        </div>
+
+        <button type="button" id="p-predict">Predict</button>
+        <div id="p-predict-error" class="error" hidden></div>
+      </div>
+
+      <div id="p-result-card" class="card" hidden>
+        <h3>Prediction</h3>
+        <div class="prediction-big" id="p-r-prediction">—</div>
+        <div class="result">
+          <div>served by: <code id="p-r-served-by"></code></div>
+          <div style="margin-top: 6px;">raw response:</div>
+          <pre id="p-r-raw"></pre>
         </div>
       </div>
     </div>
   </div>
 
   <script>
+    // ============================ shared utils ============================
     const TOKEN_KEY = 'rest_app_admin_token';
-    const FORM_FIELDS = ['category', 'project', 'model_name', 'model_family', 'description'];
-    const REMEMBER_PREFIX = 'rest_app_field_';
+    const SHARED_KEYS = ['category', 'project', 'model_name'];
+    const TRIGGER_KEYS = ['category', 'project', 'model_name', 'model_family', 'description'];
 
     const tokenInput = document.getElementById('token');
-    const toggleBtn = document.getElementById('toggle-token');
-    const form = document.getElementById('form');
-    const errorEl = document.getElementById('error');
-    const submitBtn = document.getElementById('submit');
-    const resultCard = document.getElementById('result-card');
-    const rTriggerId = document.getElementById('r-trigger-id');
-    const rStatus = document.getElementById('r-status');
-    const rUri = document.getElementById('r-uri');
-    const rReason = document.getElementById('r-reason');
-
-    // Restore token + last form values
-    tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
-    for (const name of FORM_FIELDS) {
-      const saved = localStorage.getItem(REMEMBER_PREFIX + name);
-      if (saved) form.elements[name].value = saved;
-    }
-
-    toggleBtn.addEventListener('click', () => {
+    document.getElementById('toggle-token').addEventListener('click', () => {
       tokenInput.type = tokenInput.type === 'password' ? 'text' : 'password';
-      toggleBtn.textContent = tokenInput.type === 'password' ? 'Show' : 'Hide';
     });
 
-    function showError(msg) {
-      errorEl.textContent = msg;
-      errorEl.hidden = false;
+    tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+    tokenInput.addEventListener('change', () => localStorage.setItem(TOKEN_KEY, tokenInput.value));
+
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+      });
+    });
+
+    // Sync shared (category/project/model_name) between tabs via localStorage
+    function saveShared() {
+      for (const k of SHARED_KEYS) {
+        const el = document.getElementById('t-' + k) || document.getElementById('p-' + k);
+        if (el && el.value) localStorage.setItem('rest_app_shared_' + k, el.value);
+      }
     }
-    function clearError() { errorEl.hidden = true; errorEl.textContent = ''; }
-    function setStatus(s, reason) {
-      rStatus.textContent = s;
-      rStatus.className = 'status ' + s;
-      if (reason) { rReason.textContent = 'reason: ' + reason; rReason.hidden = false; }
-      else { rReason.hidden = true; }
+    function loadShared() {
+      for (const k of SHARED_KEYS) {
+        const saved = localStorage.getItem('rest_app_shared_' + k);
+        if (!saved) continue;
+        for (const prefix of ['t-', 'p-']) {
+          const el = document.getElementById(prefix + k);
+          if (el && !el.value) el.value = saved;
+        }
+      }
+    }
+    loadShared();
+    SHARED_KEYS.forEach(k => {
+      ['t-' + k, 'p-' + k].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', saveShared);
+      });
+    });
+
+    // ============================ TRIGGER tab ============================
+    const triggerForm = document.getElementById('trigger-form');
+    const tError = document.getElementById('t-error');
+    const tSubmit = document.getElementById('t-submit');
+    const tResultCard = document.getElementById('t-result-card');
+    const tRTriggerId = document.getElementById('t-r-trigger-id');
+    const tRStatus = document.getElementById('t-r-status');
+    const tRUri = document.getElementById('t-r-uri');
+    const tRReason = document.getElementById('t-r-reason');
+
+    for (const k of TRIGGER_KEYS) {
+      const saved = localStorage.getItem('rest_app_field_' + k);
+      const el = document.getElementById('t-' + k);
+      if (saved && el && !el.value) el.value = saved;
+    }
+
+    function setTriggerStatus(s, reason) {
+      tRStatus.textContent = s;
+      tRStatus.className = 'status ' + s;
+      if (reason) { tRReason.textContent = 'reason: ' + reason; tRReason.hidden = false; }
+      else { tRReason.hidden = true; }
     }
 
     let pollHandle = null;
-    function stopPolling() {
-      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
-    }
+    function stopPolling() { if (pollHandle) { clearInterval(pollHandle); pollHandle = null; } }
 
-    async function pollStatus(triggerId, category, project, token) {
+    async function pollStatus(triggerId, category, project) {
       const url = `/trigger-status/${encodeURIComponent(triggerId)}?` +
                   `project=${encodeURIComponent(project)}&category=${encodeURIComponent(category)}`;
       try {
-        const r = await fetch(url, { headers: { 'X-Admin-Token': token } });
-        if (r.status === 404) {
-          // Not yet visible — keep polling
-          return;
-        }
+        const r = await fetch(url);
+        if (r.status === 404) return;
         if (!r.ok) {
-          setStatus('failed', `status endpoint returned HTTP ${r.status}`);
+          setTriggerStatus('failed', `status endpoint returned HTTP ${r.status}`);
           stopPolling();
           return;
         }
         const body = await r.json();
-        setStatus(body.status, body.reason);
-        if (body.status === 'failed' || body.status === 'completed') {
-          stopPolling();
-        }
+        setTriggerStatus(body.status, body.reason);
+        if (body.status === 'failed' || body.status === 'completed') stopPolling();
       } catch (e) {
-        // Network blip — keep trying
         console.warn('poll failed:', e);
       }
     }
 
-    form.addEventListener('submit', async (ev) => {
+    triggerForm.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      clearError();
+      tError.hidden = true;
       stopPolling();
-      resultCard.hidden = true;
+      tResultCard.hidden = true;
 
       const token = tokenInput.value.trim();
-      if (!token) { showError('Admin token required.'); return; }
+      if (!token) { tError.textContent = 'Admin token required.'; tError.hidden = false; return; }
       localStorage.setItem(TOKEN_KEY, token);
-      for (const name of FORM_FIELDS) {
-        localStorage.setItem(REMEMBER_PREFIX + name, form.elements[name].value);
+      for (const k of TRIGGER_KEYS) {
+        const el = document.getElementById('t-' + k);
+        if (el) localStorage.setItem('rest_app_field_' + k, el.value);
       }
+      saveShared();
 
-      const fd = new FormData(form);
-      fd.delete('token');  // do NOT send the token as a form field
+      const fd = new FormData();
+      for (const k of ['category', 'project', 'model_name', 'model_family', 'description']) {
+        fd.append(k, document.getElementById('t-' + k).value);
+      }
+      fd.append('dataset', document.getElementById('t-dataset').files[0]);
+      fd.append('params', document.getElementById('t-params').files[0]);
 
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'Uploading…';
-
+      tSubmit.disabled = true;
+      tSubmit.textContent = 'Uploading…';
       try {
         const r = await fetch('/trigger-train', {
           method: 'POST',
@@ -244,34 +385,233 @@
           body: fd,
         });
         const body = await r.json().catch(() => ({}));
-
         if (!r.ok) {
-          showError(`HTTP ${r.status}: ${body.detail || r.statusText}`);
+          tError.textContent = `HTTP ${r.status}: ${body.detail || r.statusText}`;
+          tError.hidden = false;
           return;
         }
-
-        resultCard.hidden = false;
-        rTriggerId.textContent = body.trigger_id;
-        rUri.textContent = body.trigger_uri;
-        setStatus('pending');
-
-        const category = fd.get('category');
-        const project = fd.get('project');
-        // Poll once now, then every 5 s
-        pollStatus(body.trigger_id, category, project, token);
-        pollHandle = setInterval(
-          () => pollStatus(body.trigger_id, category, project, token),
-          5000,
-        );
-        // Hard-stop after 60 minutes so we don't poll forever on a hung run
+        tResultCard.hidden = false;
+        tRTriggerId.textContent = body.trigger_id;
+        tRUri.textContent = body.trigger_uri;
+        setTriggerStatus('pending');
+        const cat = document.getElementById('t-category').value;
+        const proj = document.getElementById('t-project').value;
+        pollStatus(body.trigger_id, cat, proj);
+        pollHandle = setInterval(() => pollStatus(body.trigger_id, cat, proj), 5000);
         setTimeout(stopPolling, 60 * 60 * 1000);
       } catch (e) {
-        showError('Request failed: ' + (e?.message || e));
+        tError.textContent = 'Request failed: ' + (e?.message || e);
+        tError.hidden = false;
       } finally {
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Trigger training';
+        tSubmit.disabled = false;
+        tSubmit.textContent = 'Trigger training';
       }
     });
+
+    // ============================ PREDICT tab ============================
+    const pLoadBtn = document.getElementById('p-load');
+    const pClearBtn = document.getElementById('p-clear');
+    const pInfoError = document.getElementById('p-info-error');
+    const pInfoCard = document.getElementById('p-info-card');
+    const pFeaturesCard = document.getElementById('p-features-card');
+    const pFeaturesForm = document.getElementById('p-features-form');
+    const pFeaturesHint = document.getElementById('p-features-hint');
+    const pRawJsonWrap = document.getElementById('p-raw-json-wrap');
+    const pRawJson = document.getElementById('p-raw-json');
+    const pPredictBtn = document.getElementById('p-predict');
+    const pPredictError = document.getElementById('p-predict-error');
+    const pResultCard = document.getElementById('p-result-card');
+
+    let loadedFeatureCols = null;  // populated by /model/info
+
+    pClearBtn.addEventListener('click', () => {
+      pInfoCard.hidden = true;
+      pFeaturesCard.hidden = true;
+      pResultCard.hidden = true;
+      pFeaturesForm.innerHTML = '';
+      pRawJson.value = '';
+      loadedFeatureCols = null;
+    });
+
+    pLoadBtn.addEventListener('click', async () => {
+      pInfoError.hidden = true;
+      pInfoCard.hidden = true;
+      pFeaturesCard.hidden = true;
+      pResultCard.hidden = true;
+
+      const cat = document.getElementById('p-category').value.trim();
+      const proj = document.getElementById('p-project').value.trim();
+      const name = document.getElementById('p-model_name').value.trim();
+      const chan = document.getElementById('p-channel').value;
+      const ver = document.getElementById('p-version').value.trim();
+      saveShared();
+
+      if (!cat || !proj || !name) {
+        pInfoError.textContent = 'Category, project, and model_name are required.';
+        pInfoError.hidden = false;
+        return;
+      }
+
+      const qs = new URLSearchParams({ category: cat, project: proj, model_name: name });
+      if (ver) qs.set('version', ver);
+      else if (chan) qs.set('channel', chan);
+
+      pLoadBtn.disabled = true;
+      pLoadBtn.textContent = 'Loading…';
+      try {
+        const r = await fetch('/model/info?' + qs.toString());
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          pInfoError.textContent = `HTTP ${r.status}: ${body.detail || r.statusText}`;
+          pInfoError.hidden = false;
+          return;
+        }
+        pInfoCard.hidden = false;
+        document.getElementById('p-i-version').textContent = body.version_id || body.version || '—';
+        document.getElementById('p-i-run-id').textContent = body.run_id || '—';
+        document.getElementById('p-i-type').textContent = body.model_type || '—';
+        const mlflow = body.mlflow_run_url || body.mlflow_model_url;
+        if (mlflow) {
+          document.getElementById('p-i-mlflow').href = mlflow;
+          document.getElementById('p-i-mlflow-row').hidden = false;
+        } else {
+          document.getElementById('p-i-mlflow-row').hidden = true;
+        }
+
+        // /model/info doesn't return schema_contract; pull manifest.uri.../manifest.json
+        // by way of the cache.list endpoint isn't available. Instead, we ask /predict
+        // to tell us by hitting it with empty features and parsing the 422.
+        // Cleaner: derive feature columns from a follow-up call. For now: try
+        // /predict with {} to provoke "missing features: [...]".
+        loadedFeatureCols = await _discoverFeatureColumns(cat, proj, name, ver, chan);
+        renderFeatureInputs(loadedFeatureCols);
+        pFeaturesCard.hidden = false;
+      } catch (e) {
+        pInfoError.textContent = 'Request failed: ' + (e?.message || e);
+        pInfoError.hidden = false;
+      } finally {
+        pLoadBtn.disabled = false;
+        pLoadBtn.textContent = 'Load model schema';
+      }
+    });
+
+    async function _discoverFeatureColumns(cat, proj, name, ver, chan) {
+      // Probe /predict with empty features. If the model has a schema_contract,
+      // we get a 422 with the missing list. If not, we'll see something else and
+      // fall back to raw-JSON entry.
+      const body = { features: {}, category: cat, project: proj, model_name: name };
+      if (ver) body.version = ver;
+      else if (chan) body.channel = chan;
+      try {
+        const r = await fetch('/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (r.status === 422) {
+          const j = await r.json();
+          const detail = j.detail || '';
+          const m = String(detail).match(/missing features:\s*\[(.*?)\]/);
+          if (m) return m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+        }
+      } catch (e) { /* fall through */ }
+      return null;
+    }
+
+    function renderFeatureInputs(cols) {
+      pFeaturesForm.innerHTML = '';
+      if (cols && cols.length) {
+        pFeaturesHint.textContent = `${cols.length} feature(s) required by the model's schema_contract.`;
+        pRawJsonWrap.hidden = true;
+        for (const c of cols) {
+          const label = document.createElement('label');
+          label.htmlFor = 'feat-' + c;
+          label.textContent = c;
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.id = 'feat-' + c;
+          input.dataset.feature = c;
+          input.placeholder = 'value';
+          pFeaturesForm.appendChild(label);
+          pFeaturesForm.appendChild(input);
+        }
+      } else {
+        pFeaturesHint.textContent =
+          'No schema_contract available — paste the features dict as JSON.';
+        pRawJsonWrap.hidden = false;
+      }
+    }
+
+    function _coerce(value) {
+      if (value === '' || value === null) return null;
+      const n = Number(value);
+      if (!Number.isNaN(n) && value.trim() !== '') return n;
+      return value;
+    }
+
+    pPredictBtn.addEventListener('click', async () => {
+      pPredictError.hidden = true;
+      pResultCard.hidden = true;
+
+      const cat = document.getElementById('p-category').value.trim();
+      const proj = document.getElementById('p-project').value.trim();
+      const name = document.getElementById('p-model_name').value.trim();
+      const chan = document.getElementById('p-channel').value;
+      const ver = document.getElementById('p-version').value.trim();
+
+      let features;
+      if (loadedFeatureCols) {
+        features = {};
+        for (const c of loadedFeatureCols) {
+          const el = document.getElementById('feat-' + c);
+          features[c] = _coerce(el.value);
+        }
+      } else {
+        try { features = JSON.parse(pRawJson.value || '{}'); }
+        catch (e) {
+          pPredictError.textContent = 'Features must be valid JSON: ' + e.message;
+          pPredictError.hidden = false;
+          return;
+        }
+      }
+
+      const body = { features, category: cat, project: proj, model_name: name };
+      if (ver) body.version = ver;
+      else if (chan) body.channel = chan;
+
+      pPredictBtn.disabled = true;
+      pPredictBtn.textContent = 'Predicting…';
+      try {
+        const r = await fetch('/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          pPredictError.textContent = `HTTP ${r.status}: ${j.detail || r.statusText}`;
+          pPredictError.hidden = false;
+          return;
+        }
+        pResultCard.hidden = false;
+        const pred = j.prediction;
+        document.getElementById('p-r-prediction').textContent =
+          typeof pred === 'object' ? JSON.stringify(pred) : String(pred);
+        const m = j.model || {};
+        document.getElementById('p-r-served-by').textContent =
+          `${m.category}/${m.project}/${m.model_name} ${m.version_id || ''}`;
+        document.getElementById('p-r-raw').textContent = JSON.stringify(j, null, 2);
+      } catch (e) {
+        pPredictError.textContent = 'Request failed: ' + (e?.message || e);
+        pPredictError.hidden = false;
+      } finally {
+        pPredictBtn.disabled = false;
+        pPredictBtn.textContent = 'Predict';
+      }
+    });
+
+    // Render the feature inputs panel placeholder text on load
+    document.getElementById('p-i-features').textContent = '(load a model to see)';
   </script>
 </body>
 </html>

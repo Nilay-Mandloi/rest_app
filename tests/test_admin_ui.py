@@ -18,13 +18,24 @@ def test_trigger_form_served(make_app):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
-    # Sanity-check the form has the inputs the API requires.
-    assert 'name="category"' in body
-    assert 'name="project"' in body
-    assert 'name="model_name"' in body
-    assert 'name="model_family"' in body
-    assert 'name="dataset"' in body
-    assert 'name="params"' in body
-    # And actually POSTs to the right endpoint.
+    # Trigger tab inputs
+    assert 'id="t-category"' in body
+    assert 'id="t-project"' in body
+    assert 'id="t-model_name"' in body
+    assert 'id="t-model_family"' in body
+    assert 'id="t-dataset"' in body
+    assert 'id="t-params"' in body
+    # Predict tab inputs
+    assert 'id="p-category"' in body
+    assert 'id="p-project"' in body
+    assert 'id="p-model_name"' in body
+    assert 'id="p-channel"' in body
+    assert 'id="p-version"' in body
+    # All four endpoints the UI calls
     assert "/trigger-train" in body
     assert "/trigger-status/" in body
+    assert "/model/info" in body
+    assert "/predict" in body
+    # Two tabs present
+    assert 'data-tab="trigger"' in body
+    assert 'data-tab="predict"' in body
