@@ -16,6 +16,17 @@ dependencies = [
     "jsonschema>=4.21",
     "loguru>=0.7",
     "python-multipart>=0.0.9",
+    # ── Model runtime — MUST match the versions in mlops's
+    #    requirements.runtime.lock. pickle.load reconstructs the trained
+    #    Pipeline using these libraries; version drift causes either an
+    #    ImportError at load time or subtle silent prediction drift.
+    "scikit-learn==1.4.2",
+    "lightgbm==4.3.0",
+    "xgboost==2.0.3",
+    "numpy==1.26.4",
+    "pandas==2.2.2",
+    "joblib==1.4.2",
+    "scipy==1.13.1",
 ]
 
 [project.optional-dependencies]
