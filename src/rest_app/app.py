@@ -56,8 +56,11 @@ def _to_matrix(rows: Iterable[dict[str, Any]], columns: list[str] | None) -> lis
     return [[r.get(k) for k in keys] for r in rows]
 
 
-def _predict(model: Any, X: list[list[Any]]) -> list[Any]:
-    out = model.predict(X)
+def _predict(model: Any, X: list[list[Any]], columns: list[str] | None = None) -> list[Any]:
+    import pandas as pd
+
+    frame: Any = pd.DataFrame(X, columns=columns) if columns else X
+    out = model.predict(frame)
     try:
         return list(out)
     except TypeError:
@@ -270,7 +273,7 @@ def create_app(
                 raise HTTPException(status_code=422, detail=f"missing features: {missing}")
         X = _to_matrix([req.features], cols)
         try:
-            preds = _predict(loaded.obj, X)
+            preds = _predict(loaded.obj, X, cols)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
         return {
@@ -309,7 +312,7 @@ def create_app(
                     )
         X = _to_matrix(req.rows, cols)
         try:
-            preds = _predict(loaded.obj, X)
+            preds = _predict(loaded.obj, X, cols)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"prediction failed: {exc}") from exc
         return {

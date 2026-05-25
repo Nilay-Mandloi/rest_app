@@ -25,8 +25,11 @@ class ToyModel:
     """Picklable toy that returns the sum of each row."""
 
     def predict(self, X):
+        import pandas as pd
+
+        rows = X.values.tolist() if isinstance(X, pd.DataFrame) else X
         out = []
-        for row in X:
+        for row in rows:
             try:
                 out.append(float(sum(float(v or 0) for v in row)))
             except Exception:
