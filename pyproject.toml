@@ -31,8 +31,10 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Ship the admin UI inside the wheel so it works after pip install / Docker build.
-rest_app = ["static/*.html", "static/*.css", "static/*.js"]
+# Ship the admin UI + JSON Schemas inside the wheel so they work after
+# pip install / Docker build. validation.py loads the schemas at runtime;
+# the static HTML is served by the FastAPI mount.
+rest_app = ["static/*.html", "static/*.css", "static/*.js", "schemas/*.json"]
 
 [tool.ruff]
 line-length = 100

@@ -7,14 +7,20 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+_SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
+
 
 def _schemas_dir() -> Path:
-    here = Path(__file__).resolve()
-    for ancestor in (here.parent, *here.parents):
-        cand = ancestor / "schemas"
-        if cand.is_dir() and (cand / "pointer.v1.json").exists():
-            return cand
-    raise FileNotFoundError("schemas/ directory not found relative to rest_app package")
+    """JSON Schemas ship inside the package (src/rest_app/schemas/) so they
+    are available whether rest_app is run from a source checkout or an
+    installed wheel / Docker image."""
+    if not _SCHEMAS_DIR.is_dir() or not (_SCHEMAS_DIR / "pointer.v1.json").exists():
+        raise FileNotFoundError(
+            f"schemas/ directory missing from rest_app package at {_SCHEMAS_DIR}. "
+            "If running from source, ensure src/rest_app/schemas/*.json exist; "
+            "if installed, the wheel was built without package-data — check pyproject.toml."
+        )
+    return _SCHEMAS_DIR
 
 
 @cache
