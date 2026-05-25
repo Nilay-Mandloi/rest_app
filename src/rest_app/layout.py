@@ -103,3 +103,7 @@ def trigger_running_key(prefix: str, project: str, trigger_id: str) -> str:
 
 def trigger_failure_key(prefix: str, project: str, trigger_id: str) -> str:
     return f"{trigger_root(prefix, project, trigger_id)}/failed.json"
+
+
+def trigger_completed_key(prefix: str, project: str, trigger_id: str) -> str:
+    return f"{trigger_root(prefix, project, trigger_id)}/completed.json"

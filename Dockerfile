@@ -6,6 +6,12 @@ RUN pip install --no-cache-dir --upgrade pip build && \
     pip wheel --no-cache-dir --wheel-dir /wheels .
 
 FROM python:3.11-slim
+# libgomp1: OpenMP runtime required by LightGBM's native shared library.
+# libglib2.0-0: required by XGBoost on slim images.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 COPY --from=builder /wheels /wheels

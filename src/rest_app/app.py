@@ -16,6 +16,7 @@ from .config import CATEGORY_RE, MODEL_NAME_RE, PROJECT_RE, VERSION_ID_RE, Setti
 from .layout import (
     pointer_key,
     project_prefix,
+    trigger_completed_key,
     trigger_failure_key,
     trigger_metadata_key,
     trigger_running_key,
@@ -623,7 +624,9 @@ def create_app(
         _validate_category_project(category, project)
         bucket = settings.bucket_for(category)
 
-        # Failed wins over running wins over trigger.json existence.
+        # Priority: failed > completed > running > pending.
+        # meta (trigger.json) is always read — needed for the 404 guard and to
+        # look up model_name when surfacing artifact paths on completion.
         failed = store.get_json(bucket, trigger_failure_key(settings.prefix, project, trigger_id))
         if failed is not None:
             return {
@@ -631,10 +634,34 @@ def create_app(
                 "status": "failed",
                 "reason": failed.get("reason", ""),
             }
-        running = store.get_json(bucket, trigger_running_key(settings.prefix, project, trigger_id))
+
         meta = store.get_json(bucket, trigger_metadata_key(settings.prefix, project, trigger_id))
-        if meta is None and running is None:
+        completed = store.get_json(
+            bucket, trigger_completed_key(settings.prefix, project, trigger_id)
+        )
+        running = store.get_json(bucket, trigger_running_key(settings.prefix, project, trigger_id))
+
+        if meta is None and running is None and completed is None:
             raise HTTPException(status_code=404, detail=f"no such trigger: {trigger_id}")
+
+        if completed is not None:
+            resp: dict[str, Any] = {"trigger_id": trigger_id, "status": "completed"}
+            # Best-effort: read stable pointer to surface the pkl path.
+            mn = (meta or {}).get("model_name", "")
+            if mn:
+                try:
+                    ptr_raw = store.get_json(
+                        bucket, pointer_key(settings.prefix, project, mn, "stable")
+                    )
+                    if ptr_raw and ptr_raw.get("manifest_uri"):
+                        manifest_uri: str = ptr_raw["manifest_uri"]
+                        resp["version_id"] = ptr_raw.get("version_id")
+                        resp["manifest_uri"] = manifest_uri
+                        resp["model_pkl_uri"] = manifest_uri.replace("/manifest.json", "/model.pkl")
+                except Exception:
+                    pass  # non-fatal; caller just won't see artifact paths
+            return resp
+
         if running is not None:
             return {"trigger_id": trigger_id, "status": "running"}
         return {"trigger_id": trigger_id, "status": "pending"}
