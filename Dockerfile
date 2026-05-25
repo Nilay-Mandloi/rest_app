@@ -9,7 +9,9 @@ FROM python:3.11-slim
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 COPY --from=builder /wheels /wheels
-COPY schemas ./schemas
+# JSON Schemas + static admin UI ship inside the rest_app wheel via the
+# package-data declaration in pyproject.toml (rest_app/schemas/*.json,
+# rest_app/static/*). No separate COPY required.
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir /wheels/*.whl && \
     rm -rf /wheels && \
