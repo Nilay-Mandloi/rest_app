@@ -20,6 +20,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
+            git config --global --add safe.directory /home/rest_app
             cd /home/rest_app
             git pull origin main
             docker build -t rest-app:latest .
