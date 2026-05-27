@@ -34,10 +34,9 @@ def fake_orchestrator() -> OrchestrationAdapter:
 
 
 @pytest.fixture
-def app_with_trigger(configured_settings, cache, fake_store, fake_orchestrator):
+def app_with_trigger(configured_settings, fake_store, fake_orchestrator):
     return create_app(
         settings=configured_settings,
-        cache=cache,
         writable_store=fake_store,
         orchestrator=fake_orchestrator,
     )
@@ -118,13 +117,12 @@ def test_trigger_train_rejects_invalid_project(app_with_trigger, admin_token):
 
 
 def test_trigger_train_rejects_oversized_dataset(
-    configured_settings, cache, fake_store, fake_orchestrator, admin_token, monkeypatch
+    configured_settings, fake_store, fake_orchestrator, admin_token, monkeypatch
 ):
     monkeypatch.setenv("MAX_DATASET_BYTES", "100")
     tight_settings = Settings.from_env()
     app = create_app(
         settings=tight_settings,
-        cache=cache,
         writable_store=fake_store,
         orchestrator=fake_orchestrator,
     )
@@ -141,12 +139,11 @@ def test_trigger_train_rejects_oversized_dataset(
 
 
 def test_trigger_train_returns_502_on_dispatch_refusal(
-    configured_settings, cache, fake_store, admin_token
+    configured_settings, fake_store, admin_token
 ):
     orch = CapturingOrchestrator(raise_runtime=True)
     app = create_app(
         settings=configured_settings,
-        cache=cache,
         writable_store=fake_store,
         orchestrator=orch,
     )

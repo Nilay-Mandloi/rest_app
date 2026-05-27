@@ -11,7 +11,6 @@ from moto import mock_aws
 
 from rest_app.adapters.s3_store import S3ReadStore
 from rest_app.config import Settings
-from rest_app.loader import ModelCache
 
 CATEGORY = "mlops"
 PROJECT = "product_dq"
@@ -39,9 +38,6 @@ class ToyModel:
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.setenv("DEFAULT_CATEGORY", CATEGORY)
-    monkeypatch.setenv("DEFAULT_PROJECT", PROJECT)
-    monkeypatch.setenv("DEFAULT_MODEL_NAME", MODEL_NAME)
     monkeypatch.setenv("APP_ADMIN_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
@@ -132,11 +128,6 @@ def s3_world():
 
 
 @pytest.fixture
-def cache(settings, s3_world) -> ModelCache:
-    return ModelCache(settings, store=S3ReadStore(client=s3_world))
-
-
-@pytest.fixture
 def publish_artifacts():
     """Expose helper for tests that need to publish their own variants."""
     return _publish_artifacts
@@ -153,7 +144,20 @@ def bucket_name() -> str:
 
 
 @pytest.fixture
-def make_app(settings, cache):
+def make_app(settings, s3_world):
     from rest_app.app import create_app
+    from rest_app.model import BakedModel
 
-    return create_app(settings=settings, cache=cache)
+    baked = BakedModel(
+        obj=ToyModel(),
+        feature_columns=["a", "b"],
+        version_id="v1",
+        model_type="toy",
+        run_id="test-run",
+        metrics={},
+        category=CATEGORY,
+        project=PROJECT,
+        model_name=MODEL_NAME,
+    )
+    store = S3ReadStore(client=s3_world)
+    return create_app(settings=settings, model=baked, store=store)

@@ -221,51 +221,22 @@
     <!-- ============================== PREDICT TAB ============================== -->
     <div class="panel" id="panel-predict">
       <div class="card">
-        <h3>Step 1 — Pick a model</h3>
-        <div class="row3">
-          <div>
-            <label for="p-category">Category</label>
-            <input type="text" id="p-category" required value="mlops" />
-          </div>
-          <div>
-            <label for="p-project">Project</label>
-            <input type="text" id="p-project" required placeholder="product_dq" />
-          </div>
-          <div>
-            <label for="p-model_name">Model name</label>
-            <input type="text" id="p-model_name" required placeholder="sentiment_analysis" />
-          </div>
-        </div>
-
-        <div class="row">
-          <div>
-            <label for="p-channel">Channel</label>
-            <select id="p-channel">
-              <option value="stable" selected>stable</option>
-              <option value="latest">latest</option>
-              <option value="canary">canary</option>
-              <option value="shadow">shadow</option>
-              <option value="">(use explicit version)</option>
-            </select>
-          </div>
-          <div>
-            <label for="p-version">Or explicit version (overrides channel)</label>
-            <input type="text" id="p-version" placeholder="v3" pattern="^v[1-9][0-9]*$" />
-          </div>
-        </div>
-
-        <button type="button" id="p-load">Load model schema</button>
-        <button type="button" id="p-clear" class="secondary">Clear cached form</button>
+        <h3>Step 1 — Load the baked model</h3>
+        <p class="hint">
+          This service serves the single model baked into its image at build time —
+          there is nothing to select.
+        </p>
+        <button type="button" id="p-load">Load model info</button>
         <div id="p-info-error" class="error" hidden></div>
       </div>
 
       <div id="p-info-card" class="card" hidden>
         <h3>Step 2 — Model info</h3>
         <div class="result">
+          <div>model: <code id="p-i-name"></code></div>
           <div>version: <code id="p-i-version"></code></div>
           <div>run_id: <code id="p-i-run-id"></code></div>
           <div>model_type: <code id="p-i-type"></code></div>
-          <div id="p-i-mlflow-row" hidden>MLflow: <a id="p-i-mlflow" href="#" target="_blank">open run</a></div>
           <div style="margin-top: 6px;">feature_columns:</div>
           <pre id="p-i-features"></pre>
         </div>
@@ -277,7 +248,7 @@
         <div id="p-features-form" class="feature-grid"></div>
 
         <div id="p-raw-json-wrap" style="margin-top: 12px;" hidden>
-          <label for="p-raw-json">No schema_contract — paste features as JSON</label>
+          <label for="p-raw-json">No feature_columns declared — paste features as JSON</label>
           <textarea id="p-raw-json" placeholder='{"a": 1.0, "b": 2.0}'></textarea>
         </div>
 
@@ -300,7 +271,6 @@
   <script>
     // ============================ shared utils ============================
     const TOKEN_KEY = 'rest_app_admin_token';
-    const SHARED_KEYS = ['category', 'project', 'model_name'];
     const TRIGGER_KEYS = ['category', 'project', 'model_name', 'model_family', 'description'];
 
     const tokenInput = document.getElementById('token');
@@ -318,31 +288,6 @@
         document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
-      });
-    });
-
-    // Sync shared (category/project/model_name) between tabs via localStorage
-    function saveShared() {
-      for (const k of SHARED_KEYS) {
-        const el = document.getElementById('t-' + k) || document.getElementById('p-' + k);
-        if (el && el.value) localStorage.setItem('rest_app_shared_' + k, el.value);
-      }
-    }
-    function loadShared() {
-      for (const k of SHARED_KEYS) {
-        const saved = localStorage.getItem('rest_app_shared_' + k);
-        if (!saved) continue;
-        for (const prefix of ['t-', 'p-']) {
-          const el = document.getElementById(prefix + k);
-          if (el && !el.value) el.value = saved;
-        }
-      }
-    }
-    loadShared();
-    SHARED_KEYS.forEach(k => {
-      ['t-' + k, 'p-' + k].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('input', saveShared);
       });
     });
 
@@ -502,7 +447,6 @@
         const el = document.getElementById('t-' + k);
         if (el) localStorage.setItem('rest_app_field_' + k, el.value);
       }
-      saveShared();
 
       const fd = new FormData();
       for (const k of ['category', 'project', 'model_name', 'model_family', 'description']) {
@@ -689,7 +633,6 @@
 
     // ============================ PREDICT tab ============================
     const pLoadBtn = document.getElementById('p-load');
-    const pClearBtn = document.getElementById('p-clear');
     const pInfoError = document.getElementById('p-info-error');
     const pInfoCard = document.getElementById('p-info-card');
     const pFeaturesCard = document.getElementById('p-features-card');
@@ -703,42 +646,16 @@
 
     let loadedFeatureCols = null;  // populated by /model/info
 
-    pClearBtn.addEventListener('click', () => {
-      pInfoCard.hidden = true;
-      pFeaturesCard.hidden = true;
-      pResultCard.hidden = true;
-      pFeaturesForm.innerHTML = '';
-      pRawJson.value = '';
-      loadedFeatureCols = null;
-    });
-
     pLoadBtn.addEventListener('click', async () => {
       pInfoError.hidden = true;
       pInfoCard.hidden = true;
       pFeaturesCard.hidden = true;
       pResultCard.hidden = true;
 
-      const cat = document.getElementById('p-category').value.trim();
-      const proj = document.getElementById('p-project').value.trim();
-      const name = document.getElementById('p-model_name').value.trim();
-      const chan = document.getElementById('p-channel').value;
-      const ver = document.getElementById('p-version').value.trim();
-      saveShared();
-
-      if (!cat || !proj || !name) {
-        pInfoError.textContent = 'Category, project, and model_name are required.';
-        pInfoError.hidden = false;
-        return;
-      }
-
-      const qs = new URLSearchParams({ category: cat, project: proj, model_name: name });
-      if (ver) qs.set('version', ver);
-      else if (chan) qs.set('channel', chan);
-
       pLoadBtn.disabled = true;
       pLoadBtn.textContent = 'Loading…';
       try {
-        const r = await fetch('/model/info?' + qs.toString());
+        const r = await fetch('/model/info');
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
           pInfoError.textContent = `HTTP ${r.status}: ${body.detail || r.statusText}`;
@@ -746,23 +663,17 @@
           return;
         }
         pInfoCard.hidden = false;
-        document.getElementById('p-i-version').textContent = body.version_id || body.version || '—';
+        const name = [body.category, body.project, body.model_name].filter(Boolean).join('/');
+        document.getElementById('p-i-name').textContent = name || '—';
+        document.getElementById('p-i-version').textContent = body.version_id || '—';
         document.getElementById('p-i-run-id').textContent = body.run_id || '—';
         document.getElementById('p-i-type').textContent = body.model_type || '—';
-        const mlflow = body.mlflow_run_url || body.mlflow_model_url;
-        if (mlflow) {
-          document.getElementById('p-i-mlflow').href = mlflow;
-          document.getElementById('p-i-mlflow-row').hidden = false;
-        } else {
-          document.getElementById('p-i-mlflow-row').hidden = true;
-        }
 
-        // /model/info doesn't return schema_contract; pull manifest.uri.../manifest.json
-        // by way of the cache.list endpoint isn't available. Instead, we ask /predict
-        // to tell us by hitting it with empty features and parsing the 422.
-        // Cleaner: derive feature columns from a follow-up call. For now: try
-        // /predict with {} to provoke "missing features: [...]".
-        loadedFeatureCols = await _discoverFeatureColumns(cat, proj, name, ver, chan);
+        loadedFeatureCols = body.feature_columns || null;
+        document.getElementById('p-i-features').textContent =
+          (loadedFeatureCols && loadedFeatureCols.length)
+            ? JSON.stringify(loadedFeatureCols)
+            : '(none declared)';
         renderFeatureInputs(loadedFeatureCols);
         pFeaturesCard.hidden = false;
       } catch (e) {
@@ -770,37 +681,14 @@
         pInfoError.hidden = false;
       } finally {
         pLoadBtn.disabled = false;
-        pLoadBtn.textContent = 'Load model schema';
+        pLoadBtn.textContent = 'Load model info';
       }
     });
-
-    async function _discoverFeatureColumns(cat, proj, name, ver, chan) {
-      // Probe /predict with empty features. If the model has a schema_contract,
-      // we get a 422 with the missing list. If not, we'll see something else and
-      // fall back to raw-JSON entry.
-      const body = { features: {}, category: cat, project: proj, model_name: name };
-      if (ver) body.version = ver;
-      else if (chan) body.channel = chan;
-      try {
-        const r = await fetch('/predict', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (r.status === 422) {
-          const j = await r.json();
-          const detail = j.detail || '';
-          const m = String(detail).match(/missing features:\s*\[(.*?)\]/);
-          if (m) return m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
-        }
-      } catch (e) { /* fall through */ }
-      return null;
-    }
 
     function renderFeatureInputs(cols) {
       pFeaturesForm.innerHTML = '';
       if (cols && cols.length) {
-        pFeaturesHint.textContent = `${cols.length} feature(s) required by the model's schema_contract.`;
+        pFeaturesHint.textContent = `${cols.length} feature(s) required by the model.`;
         pRawJsonWrap.hidden = true;
         for (const c of cols) {
           const label = document.createElement('label');
@@ -816,7 +704,7 @@
         }
       } else {
         pFeaturesHint.textContent =
-          'No schema_contract available — paste the features dict as JSON.';
+          'This model declares no feature_columns — paste the features dict as JSON.';
         pRawJsonWrap.hidden = false;
       }
     }
@@ -832,18 +720,11 @@
       pPredictError.hidden = true;
       pResultCard.hidden = true;
 
-      const cat = document.getElementById('p-category').value.trim();
-      const proj = document.getElementById('p-project').value.trim();
-      const name = document.getElementById('p-model_name').value.trim();
-      const chan = document.getElementById('p-channel').value;
-      const ver = document.getElementById('p-version').value.trim();
-
       let features;
-      if (loadedFeatureCols) {
+      if (loadedFeatureCols && loadedFeatureCols.length) {
         features = {};
         for (const c of loadedFeatureCols) {
-          const el = document.getElementById('feat-' + c);
-          features[c] = _coerce(el.value);
+          features[c] = _coerce(document.getElementById('feat-' + c).value);
         }
       } else {
         try { features = JSON.parse(pRawJson.value || '{}'); }
@@ -854,17 +735,13 @@
         }
       }
 
-      const body = { features, category: cat, project: proj, model_name: name };
-      if (ver) body.version = ver;
-      else if (chan) body.channel = chan;
-
       pPredictBtn.disabled = true;
       pPredictBtn.textContent = 'Predicting…';
       try {
         const r = await fetch('/predict', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ features }),
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -878,7 +755,7 @@
           typeof pred === 'object' ? JSON.stringify(pred) : String(pred);
         const m = j.model || {};
         document.getElementById('p-r-served-by').textContent =
-          `${m.category}/${m.project}/${m.model_name} ${m.version_id || ''}`;
+          [m.version_id, m.model_type && `(${m.model_type})`].filter(Boolean).join(' ') || '—';
         document.getElementById('p-r-raw').textContent = JSON.stringify(j, null, 2);
       } catch (e) {
         pPredictError.textContent = 'Request failed: ' + (e?.message || e);
@@ -888,9 +765,6 @@
         pPredictBtn.textContent = 'Predict';
       }
     });
-
-    // Render the feature inputs panel placeholder text on load
-    document.getElementById('p-i-features').textContent = '(load a model to see)';
   </script>
 </body>
 </html>

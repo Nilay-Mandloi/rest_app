@@ -21,12 +21,6 @@ class S3ReadStore(ReadOnlyArtifactStore):
     def __init__(self, *, region: str | None = None, client: Any | None = None) -> None:
         self._client = client or boto3.client("s3", region_name=region)
 
-    @property
-    def raw_client(self) -> Any:
-        """Used by tests / discovery that need to inspect bucket-level errors
-        with backend-specific exception types."""
-        return self._client
-
     def get_json(self, bucket: str, logical_key: str) -> dict | None:
         try:
             resp = self._client.get_object(Bucket=bucket, Key=logical_key)

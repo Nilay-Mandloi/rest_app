@@ -25,12 +25,15 @@ def test_trigger_form_served(make_app):
     assert 'id="t-model_family"' in body
     assert 'id="t-dataset"' in body
     assert 'id="t-params"' in body
-    # Predict tab inputs
-    assert 'id="p-category"' in body
-    assert 'id="p-project"' in body
-    assert 'id="p-model_name"' in body
-    assert 'id="p-channel"' in body
-    assert 'id="p-version"' in body
+    # Predict tab — single baked model, no routing inputs
+    assert 'id="p-load"' in body
+    assert 'id="p-i-version"' in body
+    assert 'id="p-i-features"' in body
+    assert 'id="p-features-form"' in body
+    assert 'id="p-predict"' in body
+    # The old multi-model routing inputs must be gone
+    assert 'id="p-channel"' not in body
+    assert 'id="p-version"' not in body
     # All four endpoints the UI calls
     assert "/trigger-train" in body
     assert "/trigger-status/" in body

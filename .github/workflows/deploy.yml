@@ -1,28 +1,98 @@
 name: Deploy
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      model_version:
+        description: 'Model version to bake in (e.g. v1, v7)'
+        required: true
+        type: string
+      project:
+        description: 'Project name in the artifact store'
+        required: false
+        default: 'project-mlflow'
+        type: string
+      model_name:
+        description: 'Model name in the artifact store'
+        required: false
+        default: 'sales_forecasting'
+        type: string
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      ARTIFACT_STORE_BUCKET: ${{ secrets.ARTIFACT_STORE_BUCKET }}
+      ARTIFACT_STORE_PREFIX: ${{ secrets.ARTIFACT_STORE_PREFIX }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate presigned URLs for model artifacts
+        id: presign
+        run: |
+          PREFIX="${ARTIFACT_STORE_PREFIX%/}"
+          BASE="${PREFIX:+${PREFIX}/}${{ inputs.project }}/${{ inputs.model_name }}/${{ inputs.model_version }}"
+
+          MODEL_URL=$(aws s3 presign \
+            "s3://${ARTIFACT_STORE_BUCKET}/${BASE}/model.pkl" \
+            --expires-in 3600)
+          MANIFEST_URL=$(aws s3 presign \
+            "s3://${ARTIFACT_STORE_BUCKET}/${BASE}/manifest.json" \
+            --expires-in 3600)
+
+          # heredoc syntax keeps special URL characters safe in GITHUB_OUTPUT
+          echo "model_url<<EOF" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "$MODEL_URL" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "manifest_url<<EOF" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "$MANIFEST_URL" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "Presigned URLs generated (expire in 1 hour)"
+
+      - name: Build Docker image with baked model
+        run: |
+          docker build \
+            --build-arg MODEL_URL="${{ steps.presign.outputs.model_url }}" \
+            --build-arg MANIFEST_URL="${{ steps.presign.outputs.manifest_url }}" \
+            -t "rest-app:${{ inputs.model_version }}" \
+            -t "rest-app:latest" \
+            .
+
+      - name: Save image and upload to S3
+        run: |
+          VERSION="${{ inputs.model_version }}"
+          TARBALL="rest-app-${VERSION}.tar.gz"
+          docker save "rest-app:${VERSION}" | gzip > "${TARBALL}"
+          aws s3 cp "${TARBALL}" \
+            "s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}"
+          echo "Saved: s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}"
+
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,ARTIFACT_STORE_BUCKET
           script: |
             set -e
-            git config --global --add safe.directory /home/rest_app
-            cd /home/rest_app
-            git pull origin main
-            docker build -t rest-app:latest .
+            VERSION="${{ inputs.model_version }}"
+            TARBALL="rest-app-${VERSION}.tar.gz"
+
+            which aws 2>/dev/null || pip install --quiet awscli
+
+            aws s3 cp \
+              "s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}" \
+              "/tmp/${TARBALL}"
+
+            docker load < "/tmp/${TARBALL}"
             docker stop rest-app || true
             docker rm   rest-app || true
             docker run -d \
@@ -30,67 +100,7 @@ jobs:
               --restart unless-stopped \
               --env-file /home/rest_app/.env \
               -p 8000:8000 \
-              rest-app:latest
+              "rest-app:${VERSION}"
+
+            rm -f "/tmp/${TARBALL}"
             echo "deployed: $(docker inspect --format '{{.Id}}' rest-app | cut -c1-12)"
-
-  train:
-    runs-on: ubuntu-latest
-    needs: deploy
-    timeout-minutes: 60
-
-    steps:
-      - name: Download dataset + params from S3
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-        run: |
-          aws s3 cp s3://demo-mlops-input/params.yaml /tmp/params.yaml
-          aws s3 cp s3://demo-mlops-input/store_sales_dataset.csv /tmp/store_sales_dataset.csv
-
-      - name: Wait for app to be ready
-        run: |
-          for i in $(seq 1 12); do
-            STATUS=$(curl -sf http://${{ secrets.EC2_HOST }}:8000/health | jq -r '.status' 2>/dev/null || echo "")
-            if [ "$STATUS" = "ok" ]; then echo "app ready"; exit 0; fi
-            echo "  waiting... ($i/12)"
-            sleep 10
-          done
-          echo "app did not become ready in time" >&2
-          exit 1
-
-      - name: Trigger model training
-        id: trigger
-        run: |
-          RESPONSE=$(curl -sf \
-            -X POST "http://${{ secrets.EC2_HOST }}:8000/trigger-train" \
-            -H "X-Admin-Token: ${{ secrets.REST_APP_ADMIN_TOKEN }}" \
-            -F "category=mlops" \
-            -F "project=project-mlflow" \
-            -F "model_name=sales_forecasting" \
-            -F "model_family=forecasting" \
-            -F "auto_promote=true" \
-            -F "dataset=@/tmp/store_sales_dataset.csv" \
-            -F "params=@/tmp/params.yaml")
-          echo "trigger_id=$(echo "$RESPONSE" | jq -r '.trigger_id')" >> "$GITHUB_OUTPUT"
-          echo "Trigger ID: $(echo "$RESPONSE" | jq -r '.trigger_id')"
-
-      - name: Wait for training to complete
-        run: |
-          URL="http://${{ secrets.EC2_HOST }}:8000/trigger-status/${{ steps.trigger.outputs.trigger_id }}?project=project-mlflow&category=mlops"
-          while true; do
-            sleep 30
-            STATUS=$(curl -sf "$URL" | jq -r '.status')
-            echo "  [$STATUS]"
-            if [ "$STATUS" = "failed" ]; then
-              REASON=$(curl -sf "$URL" | jq -r '.reason // "unknown"')
-              echo "Training failed: $REASON" >&2
-              exit 1
-            fi
-            [ "$STATUS" = "completed" ] && break
-          done
-
-      - name: Print published model versions
-        run: |
-          curl -s "http://${{ secrets.EC2_HOST }}:8000/projects/mlops/project-mlflow/models/sales_forecasting/versions" \
-            | jq -r '.versions[] | "\(.version_id)  [\(.channels | join(", "))]  \(.model_pkl_uri)"'
