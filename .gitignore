@@ -5,6 +5,19 @@ __pycache__/
 .env
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 build/
 dist/
 *.pkl
+# Coverage reports
+.coverage
+htmlcov/
+coverage.xml
+# Log files
+*.log
+# OS
+.DS_Store
+Thumbs.db
+# Local dataset / upload scratch files
+*.csv
+*.parquet

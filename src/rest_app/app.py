@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 
 from .config import CATEGORY_RE, MODEL_NAME_RE, PROJECT_RE, VERSION_ID_RE, Settings
 from .layout import (
+    manifest_key,
+    model_pkl_key,
+    model_root,
     pointer_key,
     project_prefix,
     trigger_completed_key,
@@ -73,6 +76,20 @@ def _feature_columns(loaded: LoadedModel) -> list[str] | None:
     if isinstance(cols, list) and cols:
         return [str(c) for c in cols]
     return None
+
+
+def _s3_list_error(exc: Exception, bucket: str, prefix: str) -> HTTPException:
+    code = ""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code", "")
+    if code == "NoSuchBucket":
+        return HTTPException(status_code=404, detail=f"bucket not found: {bucket}")
+    status = 403 if code in ("AccessDenied", "AllAccessDisabled") else 502
+    return HTTPException(
+        status_code=status,
+        detail=f"S3 list failed for s3://{bucket}/{prefix}: {code or exc}",
+    )
 
 
 def _check_admin_token(settings: Settings, token: str | None) -> None:
@@ -413,17 +430,7 @@ def create_app(
         try:
             model_names = list(store.list_subkeys(bucket, prefix))
         except Exception as exc:
-            code = ""
-            response = getattr(exc, "response", None)
-            if isinstance(response, dict):
-                code = response.get("Error", {}).get("Code", "")
-            if code == "NoSuchBucket":
-                raise HTTPException(status_code=404, detail=f"bucket not found: {bucket}") from exc
-            status = 403 if code in ("AccessDenied", "AllAccessDisabled") else 502
-            raise HTTPException(
-                status_code=status,
-                detail=f"discovery list failed for s3://{bucket}/{prefix}: {code or exc}",
-            ) from exc
+            raise _s3_list_error(exc, bucket, prefix) from exc
 
         for model_name in model_names:
             if not MODEL_NAME_RE.match(model_name):
@@ -445,6 +452,146 @@ def create_app(
         if channel_errors:
             result["channel_errors"] = channel_errors
         return result
+
+    @app.get("/projects/{category}/{project}/models/{model_name}/versions")
+    def list_model_versions(
+        category: str,
+        project: str,
+        model_name: str,
+        settings: Settings = Depends(get_settings),
+        cache: ModelCache = Depends(get_cache),
+    ) -> dict[str, Any]:
+        """List all S3-published versions for a model, newest first.
+
+        Each entry includes manifest_uri, model_pkl_uri, metrics, feature_columns,
+        and which channels (stable/latest) currently point to that version.
+        Only versions with a manifest.json present are returned (partial uploads
+        are invisible — manifest-last write invariant).
+        """
+        if not CATEGORY_RE.match(category):
+            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
+        if not PROJECT_RE.match(project):
+            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
+        if not MODEL_NAME_RE.match(model_name):
+            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
+
+        bucket = settings.bucket_for(category)
+        store = cache.store
+
+        channel_version: dict[str, str] = {}
+        for ch in ("stable", "latest"):
+            try:
+                ptr = store.get_json(bucket, pointer_key(settings.prefix, project, model_name, ch))
+                if ptr and ptr.get("version_id"):
+                    channel_version[ch] = ptr["version_id"]
+            except Exception:
+                pass
+
+        root_prefix = model_root(settings.prefix, project, model_name) + "/"
+        try:
+            children = list(store.list_subkeys(bucket, root_prefix))
+        except Exception as exc:
+            raise _s3_list_error(exc, bucket, root_prefix) from exc
+
+        versions = []
+        for ver in children:
+            if not VERSION_ID_RE.match(ver):
+                continue
+            mkey = manifest_key(settings.prefix, project, model_name, ver)
+            manifest_data = store.get_json(bucket, mkey)
+            if manifest_data is None:
+                continue  # partial upload — skip
+            sc = manifest_data.get("schema_contract") or {}
+            channels = [ch for ch, v in channel_version.items() if v == ver]
+            versions.append(
+                {
+                    "version_id": ver,
+                    "version": manifest_data.get("version"),
+                    "model_type": manifest_data.get("model_type"),
+                    "run_id": manifest_data.get("run_id"),
+                    "metrics": manifest_data.get("metrics") or {},
+                    "feature_columns": sc.get("feature_columns"),
+                    "manifest_uri": f"s3://{bucket}/{mkey}",
+                    "model_pkl_uri": (
+                        f"s3://{bucket}/{model_pkl_key(settings.prefix, project, model_name, ver)}"
+                    ),
+                    "channels": channels,
+                    "published_at": manifest_data.get("published_at"),
+                }
+            )
+
+        versions.sort(key=lambda v: v.get("version") or 0, reverse=True)
+        return {
+            "category": category,
+            "project": project,
+            "model_name": model_name,
+            "bucket": bucket,
+            "versions": versions,
+        }
+
+    @app.get("/projects/{category}/{project}/models/{model_name}/versions/{version_id}")
+    def get_model_version(
+        category: str,
+        project: str,
+        model_name: str,
+        version_id: str,
+        settings: Settings = Depends(get_settings),
+        cache: ModelCache = Depends(get_cache),
+    ) -> dict[str, Any]:
+        """Return full manifest details for a single model version."""
+        if not CATEGORY_RE.match(category):
+            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
+        if not PROJECT_RE.match(project):
+            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
+        if not MODEL_NAME_RE.match(model_name):
+            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
+        if not VERSION_ID_RE.match(version_id):
+            raise HTTPException(status_code=400, detail=f"invalid version_id: {version_id!r}")
+
+        bucket = settings.bucket_for(category)
+        store = cache.store
+
+        mkey = manifest_key(settings.prefix, project, model_name, version_id)
+        manifest_data = store.get_json(bucket, mkey)
+        if manifest_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"version {version_id} not found for {project}/{model_name}",
+            )
+
+        channel_version: dict[str, str] = {}
+        for ch in ("stable", "latest"):
+            try:
+                ptr = store.get_json(bucket, pointer_key(settings.prefix, project, model_name, ch))
+                if ptr and ptr.get("version_id"):
+                    channel_version[ch] = ptr["version_id"]
+            except Exception:
+                pass
+        channels = [ch for ch, v in channel_version.items() if v == version_id]
+
+        sc = manifest_data.get("schema_contract") or {}
+        return {
+            "category": category,
+            "project": project,
+            "model_name": model_name,
+            "version_id": version_id,
+            "version": manifest_data.get("version"),
+            "model_type": manifest_data.get("model_type"),
+            "run_id": manifest_data.get("run_id"),
+            "metrics": manifest_data.get("metrics") or {},
+            "feature_columns": sc.get("feature_columns"),
+            "schema_contract": sc,
+            "artifact_checksums": manifest_data.get("artifact_checksums"),
+            "manifest_uri": f"s3://{bucket}/{mkey}",
+            "model_pkl_uri": (
+                f"s3://{bucket}/{model_pkl_key(settings.prefix, project, model_name, version_id)}"
+            ),
+            "channels": channels,
+            "published_at": manifest_data.get("published_at"),
+            "mlflow_run_url": manifest_data.get("mlflow_run_url"),
+            "mlflow_model_url": manifest_data.get("mlflow_model_url"),
+            "bucket": bucket,
+        }
 
     # ------------------------------------------------------------------
     # Cache admin

@@ -197,16 +197,22 @@
           <div style="margin-top: 6px;">trigger_uri:</div>
           <pre id="t-r-uri"></pre>
           <div id="t-r-reason" class="error" hidden></div>
-          <div id="t-r-model-info" hidden
+          <div id="t-r-versions-wrap" hidden
                style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px;">
-            <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px;">
-              Promoted model (current champion)
-            </div>
-            <div>version: <code id="t-r-model-version"></code></div>
-            <div style="margin-top: 6px;">model.pkl S3 path:</div>
-            <pre id="t-r-pkl-uri"
-                 style="word-break: break-all; cursor: pointer;"
-                 title="Click to copy"></pre>
+            <div style="font-weight: 600; font-size: 13px; margin-bottom: 8px;">Model versions</div>
+            <div id="t-r-versions-status" class="hint"></div>
+            <table id="t-r-versions-table" hidden
+                   style="width:100%; border-collapse:collapse; font-size:12px; margin-top:6px;">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border);">
+                  <th style="text-align:left;padding:3px 10px 6px 0;color:var(--muted);font-weight:600;">Version</th>
+                  <th style="text-align:left;padding:3px 10px 6px 0;color:var(--muted);font-weight:600;">Channel</th>
+                  <th style="text-align:left;padding:3px 10px 6px 0;color:var(--muted);font-weight:600;">Type</th>
+                  <th style="text-align:left;padding:3px 0 6px 0;color:var(--muted);font-weight:600;">model.pkl S3 path (click to copy)</th>
+                </tr>
+              </thead>
+              <tbody id="t-r-versions-tbody"></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -349,18 +355,6 @@
     const tRStatus = document.getElementById('t-r-status');
     const tRUri = document.getElementById('t-r-uri');
     const tRReason = document.getElementById('t-r-reason');
-    const tRModelInfo = document.getElementById('t-r-model-info');
-    const tRModelVersion = document.getElementById('t-r-model-version');
-    const tRPklUri = document.getElementById('t-r-pkl-uri');
-
-    // Click-to-copy on the pkl URI pre element
-    tRPklUri.addEventListener('click', () => {
-      const text = tRPklUri.textContent;
-      if (!text) return;
-      navigator.clipboard.writeText(text)
-        .then(() => { tRPklUri.style.outline = '2px solid var(--ok)'; setTimeout(() => { tRPklUri.style.outline = ''; }, 1200); })
-        .catch(() => {});
-    });
 
     for (const k of TRIGGER_KEYS) {
       const saved = localStorage.getItem('rest_app_field_' + k);
@@ -368,17 +362,108 @@
       if (saved && el && !el.value) el.value = saved;
     }
 
-    function setTriggerStatus(s, reason, body) {
+    function setTriggerStatus(s, reason) {
       tRStatus.textContent = s;
       tRStatus.className = 'status ' + s;
       if (reason) { tRReason.textContent = 'reason: ' + reason; tRReason.hidden = false; }
       else { tRReason.hidden = true; }
-      if (s === 'completed' && body && body.model_pkl_uri) {
-        tRModelVersion.textContent = body.version_id || '—';
-        tRPklUri.textContent = body.model_pkl_uri;
-        tRModelInfo.hidden = false;
-      } else if (s !== 'completed') {
-        tRModelInfo.hidden = true;
+      const versionsWrap = document.getElementById('t-r-versions-wrap');
+      if (s === 'completed') {
+        const cat = document.getElementById('t-category').value;
+        const proj = document.getElementById('t-project').value;
+        const mn = document.getElementById('t-model_name').value;
+        loadVersionsTable(cat, proj, mn);
+      } else {
+        versionsWrap.hidden = true;
+      }
+    }
+
+    async function loadVersionsTable(category, project, modelName) {
+      const wrap = document.getElementById('t-r-versions-wrap');
+      const statusEl = document.getElementById('t-r-versions-status');
+      const table = document.getElementById('t-r-versions-table');
+      const tbody = document.getElementById('t-r-versions-tbody');
+
+      wrap.hidden = false;
+      table.hidden = true;
+      tbody.innerHTML = '';
+      statusEl.textContent = 'Loading versions…';
+
+      try {
+        const r = await fetch(
+          `/projects/${encodeURIComponent(category)}/${encodeURIComponent(project)}` +
+          `/models/${encodeURIComponent(modelName)}/versions`
+        );
+        if (!r.ok) { statusEl.textContent = `Could not load versions (HTTP ${r.status})`; return; }
+        const data = await r.json();
+        const versions = data.versions || [];
+        if (!versions.length) {
+          statusEl.textContent = 'No versions found — model may not have been promoted to S3 yet.';
+          return;
+        }
+        statusEl.textContent = '';
+
+        for (const v of versions) {
+          const tr = document.createElement('tr');
+          tr.style.borderBottom = '1px solid var(--border)';
+
+          const channels = v.channels || [];
+          const channelCell = document.createElement('td');
+          channelCell.style.cssText = 'padding:6px 10px 6px 0;';
+          if (channels.length) {
+            channels.forEach(c => {
+              const badge = document.createElement('span');
+              badge.style.cssText = 'background:var(--ok);color:white;padding:1px 6px;border-radius:10px;font-size:11px;margin-right:3px;';
+              badge.textContent = c;
+              channelCell.appendChild(badge);
+            });
+          } else {
+            channelCell.innerHTML = '<span style="color:var(--muted)">—</span>';
+          }
+
+          const metrics = v.metrics || {};
+          const metricsStr = Object.entries(metrics).slice(0, 3)
+            .map(([k, val]) => `${k}=${typeof val === 'number' ? val.toFixed(4) : val}`)
+            .join('  ');
+
+          const versionCell = document.createElement('td');
+          versionCell.style.cssText = 'padding:6px 10px 6px 0;font-weight:600;';
+          versionCell.textContent = v.version_id;
+          if (metricsStr) {
+            const m = document.createElement('div');
+            m.style.cssText = 'margin-top:2px;color:var(--muted);font-size:11px;font-weight:400;';
+            m.textContent = metricsStr;
+            versionCell.appendChild(m);
+          }
+
+          const typeCell = document.createElement('td');
+          typeCell.style.cssText = 'padding:6px 10px 6px 0;color:var(--muted);';
+          typeCell.textContent = v.model_type || '—';
+
+          const uriCell = document.createElement('td');
+          uriCell.style.cssText = 'padding:6px 0;';
+          const code = document.createElement('code');
+          code.style.cssText = 'word-break:break-all;cursor:pointer;font-size:11px;display:block;';
+          code.title = 'Click to copy';
+          code.textContent = v.model_pkl_uri || '';
+          code.addEventListener('click', () => {
+            const uri = v.model_pkl_uri;
+            if (!uri) return;
+            navigator.clipboard.writeText(uri)
+              .then(() => { code.style.outline = '2px solid var(--ok)'; setTimeout(() => { code.style.outline = ''; }, 1200); })
+              .catch(() => {});
+          });
+          uriCell.appendChild(code);
+
+          tr.appendChild(versionCell);
+          tr.appendChild(channelCell);
+          tr.appendChild(typeCell);
+          tr.appendChild(uriCell);
+          tbody.appendChild(tr);
+        }
+        table.hidden = false;
+      } catch (e) {
+        statusEl.textContent = 'Could not load versions: ' + (e?.message || String(e));
       }
     }
 
@@ -397,7 +482,7 @@
           return;
         }
         const body = await r.json();
-        setTriggerStatus(body.status, body.reason, body);
+        setTriggerStatus(body.status, body.reason);
         if (body.status === 'failed' || body.status === 'completed') stopPolling();
       } catch (e) {
         console.warn('poll failed:', e);
@@ -443,7 +528,7 @@
         tResultCard.hidden = false;
         tRTriggerId.textContent = body.trigger_id;
         tRUri.textContent = body.trigger_uri;
-        setTriggerStatus('pending', null, null);
+        setTriggerStatus('pending', null);
         const cat = document.getElementById('t-category').value;
         const proj = document.getElementById('t-project').value;
         pollStatus(body.trigger_id, cat, proj);

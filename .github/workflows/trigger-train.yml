@@ -1,0 +1,132 @@
+# Reusable workflow — trigger a training run via rest_app and wait for completion.
+#
+# Caller example (in your application repo):
+#
+#   jobs:
+#     train:
+#       uses: Nilay-Mandloi/rest_app/.github/workflows/trigger-train.yml@main
+#       with:
+#         rest_app_url: https://your-rest-app-server
+#         dataset_path: data/sales.parquet
+#         params_path: configs/params.yaml
+#         project: product_dq
+#         model_name: sales_forecasting
+#       secrets:
+#         admin_token: ${{ secrets.REST_APP_ADMIN_TOKEN }}
+#
+# Outputs:
+#   trigger_id     — the trigger ID assigned to this run
+#   versions_json  — JSON array: [{version_id, model_pkl_uri, channels, metrics}, ...]
+
+name: trigger-train
+
+on:
+  workflow_call:
+    inputs:
+      rest_app_url:
+        description: "rest_app base URL (e.g. https://your-server)"
+        required: true
+        type: string
+      dataset_path:
+        description: "Path to dataset file relative to repo root (.csv or .parquet)"
+        required: true
+        type: string
+      params_path:
+        description: "Path to params.yaml relative to repo root"
+        required: true
+        type: string
+      project:
+        description: "Project name (must match ^[a-z0-9][a-z0-9_-]{0,62}$)"
+        required: true
+        type: string
+      model_name:
+        description: "Model name"
+        required: true
+        type: string
+      category:
+        description: "Model category (default: mlops)"
+        default: "mlops"
+        type: string
+      model_family:
+        description: "Model family passed to the training run (default: lightgbm)"
+        default: "lightgbm"
+        type: string
+      auto_promote:
+        description: "Auto-promote champion on training success"
+        default: false
+        type: boolean
+      poll_interval:
+        description: "Seconds between /trigger-status polls"
+        default: 20
+        type: number
+    secrets:
+      admin_token:
+        required: true
+        description: "Value of APP_ADMIN_TOKEN set on the rest_app server"
+    outputs:
+      trigger_id:
+        description: "Trigger ID for this run"
+        value: ${{ jobs.trigger.outputs.trigger_id }}
+      versions_json:
+        description: "JSON array of all published versions after training"
+        value: ${{ jobs.trigger.outputs.versions_json }}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      trigger_id: ${{ steps.fire.outputs.trigger_id }}
+      versions_json: ${{ steps.versions.outputs.versions_json }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Step 1: upload dataset + params and fire the trigger ──────────────
+      - name: Trigger training run
+        id: fire
+        env:
+          ADMIN_TOKEN: ${{ secrets.admin_token }}
+        run: |
+          RESPONSE=$(curl -sf \
+            -X POST "${{ inputs.rest_app_url }}/trigger-train" \
+            -H "X-Admin-Token: $ADMIN_TOKEN" \
+            -F "category=${{ inputs.category }}" \
+            -F "project=${{ inputs.project }}" \
+            -F "model_name=${{ inputs.model_name }}" \
+            -F "model_family=${{ inputs.model_family }}" \
+            -F "auto_promote=${{ inputs.auto_promote }}" \
+            -F "dataset=@${{ inputs.dataset_path }}" \
+            -F "params=@${{ inputs.params_path }}")
+          echo "trigger_id=$(echo "$RESPONSE" | jq -r '.trigger_id')" >> "$GITHUB_OUTPUT"
+          echo "Trigger ID: $(echo "$RESPONSE" | jq -r '.trigger_id')"
+          echo "Status URL: ${{ inputs.rest_app_url }}$(echo "$RESPONSE" | jq -r '.status_url')"
+
+      # ── Step 2: poll /trigger-status until completed or failed ───────────
+      - name: Wait for training to complete
+        env:
+          TRIGGER_ID: ${{ steps.fire.outputs.trigger_id }}
+        run: |
+          URL="${{ inputs.rest_app_url }}/trigger-status/${TRIGGER_ID}?project=${{ inputs.project }}&category=${{ inputs.category }}"
+          while true; do
+            sleep ${{ inputs.poll_interval }}
+            STATUS=$(curl -sf "$URL" | jq -r '.status')
+            echo "  [${STATUS}]"
+            if [ "$STATUS" = "failed" ]; then
+              REASON=$(curl -sf "$URL" | jq -r '.reason // "unknown"')
+              echo "Training failed: $REASON" >&2
+              exit 1
+            fi
+            [ "$STATUS" = "completed" ] && break
+          done
+
+      # ── Step 3: fetch all versions and expose as job output ──────────────
+      - name: Fetch model versions
+        id: versions
+        run: |
+          VERSIONS_JSON=$(curl -sf \
+            "${{ inputs.rest_app_url }}/projects/${{ inputs.category }}/${{ inputs.project }}/models/${{ inputs.model_name }}/versions")
+          echo "versions_json=$(echo "$VERSIONS_JSON" | jq -c '.versions')" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "Published versions:"
+          echo "$VERSIONS_JSON" | jq -r \
+            '.versions[] | "  \(.version_id)  [\(.channels | join(", "))]  \(.model_pkl_uri)"'
