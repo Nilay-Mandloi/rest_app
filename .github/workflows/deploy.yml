@@ -8,7 +8,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    needs: []          # set to [validate] if you want CI gate before deploy
     timeout-minutes: 15
 
     steps:
@@ -33,3 +32,65 @@ jobs:
               -p 8000:8000 \
               rest-app:latest
             echo "deployed: $(docker inspect --format '{{.Id}}' rest-app | cut -c1-12)"
+
+  train:
+    runs-on: ubuntu-latest
+    needs: deploy
+    timeout-minutes: 60
+
+    steps:
+      - name: Download dataset + params from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          aws s3 cp s3://demo-mlops-input/params.yaml /tmp/params.yaml
+          aws s3 cp s3://demo-mlops-input/store_sales_dataset.csv /tmp/store_sales_dataset.csv
+
+      - name: Wait for app to be ready
+        run: |
+          for i in $(seq 1 12); do
+            STATUS=$(curl -sf http://${{ secrets.EC2_HOST }}:8000/health | jq -r '.status' 2>/dev/null || echo "")
+            if [ "$STATUS" = "ok" ]; then echo "app ready"; exit 0; fi
+            echo "  waiting... ($i/12)"
+            sleep 10
+          done
+          echo "app did not become ready in time" >&2
+          exit 1
+
+      - name: Trigger model training
+        id: trigger
+        run: |
+          RESPONSE=$(curl -sf \
+            -X POST "http://${{ secrets.EC2_HOST }}:8000/trigger-train" \
+            -H "X-Admin-Token: ${{ secrets.REST_APP_ADMIN_TOKEN }}" \
+            -F "category=mlops" \
+            -F "project=project-mlflow" \
+            -F "model_name=sales_forecasting" \
+            -F "model_family=forecasting" \
+            -F "auto_promote=true" \
+            -F "dataset=@/tmp/store_sales_dataset.csv" \
+            -F "params=@/tmp/params.yaml")
+          echo "trigger_id=$(echo "$RESPONSE" | jq -r '.trigger_id')" >> "$GITHUB_OUTPUT"
+          echo "Trigger ID: $(echo "$RESPONSE" | jq -r '.trigger_id')"
+
+      - name: Wait for training to complete
+        run: |
+          URL="http://${{ secrets.EC2_HOST }}:8000/trigger-status/${{ steps.trigger.outputs.trigger_id }}?project=project-mlflow&category=mlops"
+          while true; do
+            sleep 30
+            STATUS=$(curl -sf "$URL" | jq -r '.status')
+            echo "  [$STATUS]"
+            if [ "$STATUS" = "failed" ]; then
+              REASON=$(curl -sf "$URL" | jq -r '.reason // "unknown"')
+              echo "Training failed: $REASON" >&2
+              exit 1
+            fi
+            [ "$STATUS" = "completed" ] && break
+          done
+
+      - name: Print published model versions
+        run: |
+          curl -s "http://${{ secrets.EC2_HOST }}:8000/projects/mlops/project-mlflow/models/sales_forecasting/versions" \
+            | jq -r '.versions[] | "\(.version_id)  [\(.channels | join(", "))]  \(.model_pkl_uri)"'
