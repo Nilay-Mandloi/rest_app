@@ -51,10 +51,9 @@ on:
         default: "mlops"
         type: string
       model_family:
-        description: "Model family for this training run"
+        description: "Model family: forecasting | regression | classification"
         default: "forecasting"
-        type: choice
-        options: ["forecasting", "regression", "classification"]
+        type: string
       auto_promote:
         description: "Auto-promote champion on training success"
         default: false
