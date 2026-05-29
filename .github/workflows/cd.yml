@@ -53,10 +53,11 @@ on:
         default: ''
         type: string
       model_family:
-        description: 'Model family hint (regression / classification / ...)'
+        description: 'Model family for this training run'
         required: false
-        default: 'regression'
-        type: string
+        default: 'forecasting'
+        type: choice
+        options: ["forecasting", "regression", "classification"]
       auto_promote:
         description: 'Auto-promote champion on training success'
         required: false

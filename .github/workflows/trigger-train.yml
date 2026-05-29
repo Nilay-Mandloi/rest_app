@@ -51,9 +51,10 @@ on:
         default: "mlops"
         type: string
       model_family:
-        description: "Model family passed to the training run (default: lightgbm)"
-        default: "lightgbm"
-        type: string
+        description: "Model family for this training run"
+        default: "forecasting"
+        type: choice
+        options: ["forecasting", "regression", "classification"]
       auto_promote:
         description: "Auto-promote champion on training success"
         default: false
@@ -106,10 +107,15 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key }}
           AWS_DEFAULT_REGION: ${{ secrets.aws_default_region }}
         run: |
-          aws s3 cp "${{ inputs.dataset_s3_uri }}" /tmp/dataset_file
-          aws s3 cp "${{ inputs.params_s3_uri }}"  /tmp/params_file.yaml
+          # Preserve the file extension so the server can infer the dataset format.
+          DATASET_URI="${{ inputs.dataset_s3_uri }}"
+          DATASET_EXT="${DATASET_URI##*.}"
+          aws s3 cp "$DATASET_URI"               "/tmp/dataset.${DATASET_EXT}"
+          aws s3 cp "${{ inputs.params_s3_uri }}" /tmp/params_file.yaml
 
-          RESPONSE=$(curl -sf \
+          HTTP_CODE=$(curl -s \
+            -o /tmp/trigger_response.json \
+            -w "%{http_code}" \
             -X POST "${{ inputs.rest_app_url }}/trigger-train" \
             -H "X-Admin-Token: $ADMIN_TOKEN" \
             -F "category=${{ inputs.category }}" \
@@ -117,8 +123,16 @@ jobs:
             -F "model_name=${{ inputs.model_name }}" \
             -F "model_family=${{ inputs.model_family }}" \
             -F "auto_promote=${{ inputs.auto_promote }}" \
-            -F "dataset=@/tmp/dataset_file" \
+            -F "dataset=@/tmp/dataset.${DATASET_EXT}" \
             -F "params=@/tmp/params_file.yaml")
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "ERROR: /trigger-train returned HTTP $HTTP_CODE" >&2
+            cat /tmp/trigger_response.json >&2
+            exit 1
+          fi
+
+          RESPONSE=$(cat /tmp/trigger_response.json)
           echo "trigger_id=$(echo "$RESPONSE" | jq -r '.trigger_id')" >> "$GITHUB_OUTPUT"
           echo "Trigger ID: $(echo "$RESPONSE" | jq -r '.trigger_id')"
           echo "Status URL: ${{ inputs.rest_app_url }}$(echo "$RESPONSE" | jq -r '.status_url')"
