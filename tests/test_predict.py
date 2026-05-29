@@ -35,6 +35,17 @@ def test_predict_batch_empty_rows(make_app):
     assert r.json()["predictions"] == []
 
 
+def test_predict_rejects_runtime_version_selection(make_app):
+    """Version/model is chosen at build time (the image bakes one model), so a
+    request-level "version" (or any unknown field) must 422, not be ignored."""
+    client = TestClient(make_app)
+    r = client.post(
+        "/predict",
+        json={"features": {"a": 2, "b": 3}, "version": "v1", "project": "product_dq"},
+    )
+    assert r.status_code == 422
+
+
 def test_model_info(make_app):
     client = TestClient(make_app)
     r = client.get("/model/info")

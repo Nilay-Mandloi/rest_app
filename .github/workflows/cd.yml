@@ -1,0 +1,363 @@
+name: CD — Train and Deploy
+
+# One workflow, three entry points — all converge on the same build+deploy steps.
+#
+#   workflow_dispatch (model_version blank)  — Train-then-deploy (Mehak's flow):
+#     provide dataset_path + params_path → triggers training via rest_app → picks
+#     the promoted version_id → bakes image → ships to EC2.
+#
+#   workflow_dispatch (model_version filled) — Deploy-only:
+#     operator already knows which version to ship; skips training entirely.
+#
+#   repository_dispatch (champion-promoted)  — Automatic:
+#     mlops promote/rollback fires this after flipping stable.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Project name (e.g. ppm)'
+        required: true
+        type: string
+      model_name:
+        description: 'Model name (e.g. price_forecast)'
+        required: true
+        type: string
+      category:
+        description: 'Category'
+        required: false
+        default: 'mlops'
+        type: string
+
+      # ── Deploy-only: fill this in, training is skipped ─────────────────────
+      model_version:
+        description: 'Version to deploy (e.g. v7, or "stable"). Leave blank to train first.'
+        required: false
+        default: ''
+        type: string
+
+      # ── Train-first: leave model_version blank, fill these in ──────────────
+      rest_app_url:
+        description: 'rest_app base URL — required when training a new model'
+        required: false
+        default: ''
+        type: string
+      dataset_path:
+        description: 'Dataset file path in this repo (.csv or .parquet)'
+        required: false
+        default: ''
+        type: string
+      params_path:
+        description: 'params.yaml path in this repo'
+        required: false
+        default: ''
+        type: string
+      model_family:
+        description: 'Model family hint (regression / classification / ...)'
+        required: false
+        default: 'regression'
+        type: string
+      auto_promote:
+        description: 'Auto-promote champion on training success'
+        required: false
+        default: true
+        type: boolean
+
+      skip_compat_check:
+        description: 'Skip requirements.lock compatibility check (re-baselines only)'
+        required: false
+        default: false
+        type: boolean
+
+  repository_dispatch:
+    types: [champion-promoted]
+
+jobs:
+  # ── Job 1: trigger training ────────────────────────────────────────────────
+  # Runs only in train-first mode (model_version is blank, event is not a dispatch).
+  # Skipped in deploy-only and repository_dispatch modes.
+  train:
+    if: github.event_name == 'workflow_dispatch' && inputs.model_version == ''
+    uses: ./.github/workflows/trigger-train.yml
+    with:
+      rest_app_url: ${{ inputs.rest_app_url }}
+      dataset_path: ${{ inputs.dataset_path }}
+      params_path:  ${{ inputs.params_path }}
+      project:      ${{ inputs.project }}
+      model_name:   ${{ inputs.model_name }}
+      category:     ${{ inputs.category }}
+      model_family: ${{ inputs.model_family }}
+      auto_promote: ${{ inputs.auto_promote }}
+    secrets:
+      admin_token: ${{ secrets.REST_APP_ADMIN_TOKEN }}
+
+  # ── Job 2: build image with baked model, ship to EC2 ──────────────────────
+  # Runs always — after training succeeds, or immediately when training is skipped.
+  deploy:
+    needs: [train]
+    if: |
+      always() && (
+        needs.train.result == 'success' ||
+        needs.train.result == 'skipped'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION:    ${{ secrets.AWS_DEFAULT_REGION }}
+      ARTIFACT_STORE_BUCKET: ${{ secrets.ARTIFACT_STORE_BUCKET }}
+      ARTIFACT_STORE_PREFIX: ${{ secrets.ARTIFACT_STORE_PREFIX }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Collapse all three entry points into one (category, project, model_name, model_version).
+      - name: Resolve target
+        id: resolve
+        env:
+          # repository_dispatch payload
+          DISPATCH_CATEGORY:   ${{ github.event.client_payload.category }}
+          DISPATCH_PROJECT:    ${{ github.event.client_payload.project }}
+          DISPATCH_MODEL_NAME: ${{ github.event.client_payload.model_name }}
+          DISPATCH_VERSION_ID: ${{ github.event.client_payload.version_id }}
+          # workflow_dispatch inputs
+          INPUT_CATEGORY:      ${{ inputs.category }}
+          INPUT_PROJECT:       ${{ inputs.project }}
+          INPUT_MODEL_NAME:    ${{ inputs.model_name }}
+          INPUT_MODEL_VERSION: ${{ inputs.model_version }}
+          INPUT_SKIP_COMPAT:   ${{ inputs.skip_compat_check }}
+          # train job output (only populated in train-first mode)
+          VERSIONS_JSON:       ${{ needs.train.outputs.versions_json }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            CATEGORY="$DISPATCH_CATEGORY"
+            PROJECT="$DISPATCH_PROJECT"
+            MODEL_NAME="$DISPATCH_MODEL_NAME"
+            MODEL_VERSION="$DISPATCH_VERSION_ID"
+            SKIP_COMPAT="false"
+
+          elif [ -n "$INPUT_MODEL_VERSION" ]; then
+            # Deploy-only: version was provided directly
+            CATEGORY="$INPUT_CATEGORY"
+            PROJECT="$INPUT_PROJECT"
+            MODEL_NAME="$INPUT_MODEL_NAME"
+            MODEL_VERSION="$INPUT_MODEL_VERSION"
+            SKIP_COMPAT="${INPUT_SKIP_COMPAT:-false}"
+
+          else
+            # Train-first: pick the version the training job just promoted.
+            # Prefer stable channel; fall back to latest if metric gate rejected auto-promote.
+            CATEGORY="$INPUT_CATEGORY"
+            PROJECT="$INPUT_PROJECT"
+            MODEL_NAME="$INPUT_MODEL_NAME"
+            SKIP_COMPAT="${INPUT_SKIP_COMPAT:-false}"
+            MODEL_VERSION=$(echo "$VERSIONS_JSON" | jq -r \
+              'map(select(.channels | index("stable"))) | .[0].version_id // empty')
+            if [ -z "$MODEL_VERSION" ]; then
+              MODEL_VERSION=$(echo "$VERSIONS_JSON" | jq -r \
+                'map(select(.channels | index("latest"))) | .[0].version_id // empty')
+            fi
+            [ -n "$MODEL_VERSION" ] || { echo "ERROR: no version_id in training output" >&2; exit 1; }
+            echo "Train output → picked ${MODEL_VERSION}"
+          fi
+
+          for v in CATEGORY PROJECT MODEL_NAME MODEL_VERSION; do
+            [ -n "${!v}" ] || { echo "ERROR: ${v} is empty after resolution" >&2; exit 1; }
+          done
+
+          echo "${PROJECT}"    | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$' \
+            || { echo "ERROR: project='${PROJECT}' fails shape check" >&2; exit 1; }
+          echo "${MODEL_NAME}" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$' \
+            || { echo "ERROR: model_name='${MODEL_NAME}' fails shape check" >&2; exit 1; }
+
+          PREFIX="${ARTIFACT_STORE_PREFIX%/}"
+          PREFIX_PART="${PREFIX:+${PREFIX}/}"
+          MODEL_ROOT="${PREFIX_PART}${PROJECT}/${MODEL_NAME}"
+
+          # "stable" keyword → resolve from the S3 pointer file
+          if [ "${MODEL_VERSION}" = "stable" ]; then
+            STABLE_JSON=$(aws s3 cp "s3://${ARTIFACT_STORE_BUCKET}/${MODEL_ROOT}/stable.json" -)
+            MODEL_VERSION=$(echo "$STABLE_JSON" | jq -r '.version_id')
+            [ -n "$MODEL_VERSION" ] && [ "$MODEL_VERSION" != "null" ] \
+              || { echo "ERROR: stable.json has no version_id" >&2; exit 1; }
+            echo "Resolved stable → ${MODEL_VERSION}"
+          fi
+
+          echo "${MODEL_VERSION}" | grep -Eq '^v[1-9][0-9]*$' \
+            || { echo "ERROR: model_version='${MODEL_VERSION}' must match ^v[1-9][0-9]*\$" >&2; exit 1; }
+
+          ARTIFACT_BASE="${MODEL_ROOT}/${MODEL_VERSION}"
+
+          # Preflight: both artifacts must exist before we presign
+          aws s3api head-object --bucket "${ARTIFACT_STORE_BUCKET}" \
+            --key "${ARTIFACT_BASE}/manifest.json" >/dev/null \
+            || { echo "ERROR: manifest.json missing in S3" >&2; exit 1; }
+          aws s3api head-object --bucket "${ARTIFACT_STORE_BUCKET}" \
+            --key "${ARTIFACT_BASE}/model.pkl" >/dev/null \
+            || { echo "ERROR: model.pkl missing in S3" >&2; exit 1; }
+
+          {
+            echo "category=${CATEGORY}"
+            echo "project=${PROJECT}"
+            echo "model_name=${MODEL_NAME}"
+            echo "model_version=${MODEL_VERSION}"
+            echo "artifact_base=${ARTIFACT_BASE}"
+            echo "skip_compat_check=${SKIP_COMPAT}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Guard: refuse to deploy if the model's serialization libs differ from ours.
+      # Catches silent pickle-load failures caused by version drift.
+      # Skipped automatically when requirements.lock was not written by the training run.
+      - name: Version compatibility check
+        if: steps.resolve.outputs.skip_compat_check != 'true'
+        env:
+          ARTIFACT_BASE: ${{ steps.resolve.outputs.artifact_base }}
+        run: |
+          set -euo pipefail
+
+          if ! aws s3 cp "s3://${ARTIFACT_STORE_BUCKET}/${ARTIFACT_BASE}/requirements.lock" \
+               /tmp/training.lock 2>/dev/null; then
+            echo "requirements.lock not found in S3 — skipping compatibility check"
+            exit 0
+          fi
+
+          python - <<'PY'
+          import re, sys, tomllib
+
+          LOAD_BEARING = {"scikit-learn", "lightgbm", "xgboost", "numpy", "pandas", "joblib", "scipy"}
+
+          with open("pyproject.toml", "rb") as f:
+              pp = tomllib.load(f)
+          ours: dict[str, str] = {}
+          for spec in pp["project"]["dependencies"]:
+              m = re.match(r"^([a-zA-Z0-9_.\-]+)==([0-9][^\s;,]+)", spec)
+              if m and m.group(1).lower() in LOAD_BEARING:
+                  ours[m.group(1).lower()] = m.group(2)
+
+          theirs: dict[str, str] = {}
+          with open("/tmp/training.lock", encoding="utf-8") as fh:
+              for raw in fh:
+                  line = raw.strip().split(";", 1)[0]
+                  m = re.match(r"^([a-zA-Z0-9_.\-]+)==([0-9][^\s]+)", line)
+                  if m and m.group(1).lower() in LOAD_BEARING:
+                      theirs[m.group(1).lower()] = m.group(2)
+
+          drift: list[str] = []
+          for pkg in sorted(LOAD_BEARING):
+              o, t = ours.get(pkg), theirs.get(pkg)
+              if o and t and o != t:
+                  drift.append(f"  {pkg}: rest_app pins {o}, training used {t}")
+
+          if drift:
+              sys.stderr.write("Version drift — refusing deploy:\n" + "\n".join(drift) + "\n")
+              sys.stderr.write(
+                  "Fix: re-pin rest_app/pyproject.toml to match, or retrain against current pins.\n"
+              )
+              sys.exit(1)
+          print("Compatibility OK:", ", ".join(sorted(LOAD_BEARING)))
+          PY
+
+      - name: Generate presigned URLs
+        id: presign
+        env:
+          ARTIFACT_BASE: ${{ steps.resolve.outputs.artifact_base }}
+        run: |
+          set -euo pipefail
+          MODEL_URL=$(aws s3 presign \
+            "s3://${ARTIFACT_STORE_BUCKET}/${ARTIFACT_BASE}/model.pkl" \
+            --expires-in 3600)
+          MANIFEST_URL=$(aws s3 presign \
+            "s3://${ARTIFACT_STORE_BUCKET}/${ARTIFACT_BASE}/manifest.json" \
+            --expires-in 3600)
+          {
+            echo "model_url<<EOF";    printf "%s\n" "$MODEL_URL";    echo "EOF"
+            echo "manifest_url<<EOF"; printf "%s\n" "$MANIFEST_URL"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Presigned URLs generated (expire 1h)"
+
+      - name: Build Docker image with baked model
+        env:
+          VERSION: ${{ steps.resolve.outputs.model_version }}
+        run: |
+          docker build \
+            --build-arg MODEL_URL="${{ steps.presign.outputs.model_url }}" \
+            --build-arg MANIFEST_URL="${{ steps.presign.outputs.manifest_url }}" \
+            -t "rest-app:${VERSION}" \
+            -t "rest-app:latest" \
+            .
+
+      - name: Save image to S3
+        env:
+          VERSION: ${{ steps.resolve.outputs.model_version }}
+        run: |
+          set -euo pipefail
+          TARBALL="rest-app-${VERSION}.tar.gz"
+          docker save "rest-app:${VERSION}" | gzip > "${TARBALL}"
+          aws s3 cp "${TARBALL}" "s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}"
+          echo "Saved: s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}"
+
+      - name: Deploy to EC2 with health check and rollback
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,ARTIFACT_STORE_BUCKET
+          script: |
+            set -euo pipefail
+            VERSION="${{ steps.resolve.outputs.model_version }}"
+            TARBALL="rest-app-${VERSION}.tar.gz"
+            CONTAINER="rest-app"
+            HEALTH_URL="http://127.0.0.1:8000/ready"
+
+            aws s3 cp "s3://${ARTIFACT_STORE_BUCKET}/docker-images/${TARBALL}" "/tmp/${TARBALL}"
+
+            PREV_IMAGE=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER}" 2>/dev/null || true)
+            echo "previous image: ${PREV_IMAGE:-<none>}"
+
+            docker load < "/tmp/${TARBALL}"
+            docker stop "${CONTAINER}" 2>/dev/null || true
+            docker rm   "${CONTAINER}" 2>/dev/null || true
+
+            docker run -d \
+              --name "${CONTAINER}" \
+              --restart unless-stopped \
+              --env-file /home/rest_app/.env \
+              -p 8000:8000 \
+              "rest-app:${VERSION}"
+
+            for attempt in $(seq 1 30); do
+              if curl -fsS --max-time 2 "${HEALTH_URL}" >/dev/null; then
+                echo "deployed: $(docker inspect --format '{{.Id}}' ${CONTAINER} | cut -c1-12) v=${VERSION}"
+                rm -f "/tmp/${TARBALL}"
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "ERROR: container unhealthy after 60s" >&2
+            docker logs --tail 100 "${CONTAINER}" >&2 || true
+
+            if [ -n "${PREV_IMAGE}" ]; then
+              echo "Rolling back to ${PREV_IMAGE} ..." >&2
+              docker stop "${CONTAINER}" 2>/dev/null || true
+              docker rm   "${CONTAINER}" 2>/dev/null || true
+              docker run -d \
+                --name "${CONTAINER}" \
+                --restart unless-stopped \
+                --env-file /home/rest_app/.env \
+                -p 8000:8000 \
+                "${PREV_IMAGE}"
+              for attempt in $(seq 1 30); do
+                if curl -fsS --max-time 2 "${HEALTH_URL}" >/dev/null; then
+                  echo "rollback OK to ${PREV_IMAGE}" >&2; rm -f "/tmp/${TARBALL}"; exit 1
+                fi
+                sleep 2
+              done
+              echo "ROLLBACK ALSO FAILED — manual intervention required." >&2
+            fi
+            rm -f "/tmp/${TARBALL}"
+            exit 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import factories
 from .config import CATEGORY_RE, MODEL_NAME_RE, PROJECT_RE, VERSION_ID_RE, Settings
@@ -34,10 +35,16 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 class PredictRequest(BaseModel):
+    # The image bakes exactly one model, so which model/version to serve is a
+    # build-time choice, never a request field. Reject extras (e.g. "version",
+    # "project") so callers fail loudly instead of silently getting the baked
+    # model. GET /model/info reports the served identity.
+    model_config = ConfigDict(extra="forbid")
     features: dict[str, Any]
 
 
 class BatchPredictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -71,7 +78,7 @@ def _s3_list_error(exc: Exception, bucket: str, prefix: str) -> HTTPException:
 def _check_admin_token(settings: Settings, token: str | None) -> None:
     if not settings.admin_token:
         raise HTTPException(status_code=501, detail="admin disabled (APP_ADMIN_TOKEN not set)")
-    if not token or token != settings.admin_token:
+    if not token or not hmac.compare_digest(token, settings.admin_token):
         raise HTTPException(status_code=401, detail="invalid or missing admin token")
 
 
@@ -151,6 +158,49 @@ def create_app(
         return request.app.state.orchestrator
 
     # ------------------------------------------------------------------
+    # Validators (used by the discovery + trigger endpoints below)
+    # ------------------------------------------------------------------
+
+    def _validate_category_project(category: str, project: str) -> None:
+        if not CATEGORY_RE.match(category):
+            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
+        if not PROJECT_RE.match(project):
+            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
+
+    def _validate_target(category: str, project: str, model_name: str) -> None:
+        _validate_category_project(category, project)
+        if not MODEL_NAME_RE.match(model_name):
+            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
+
+    def _validate_versioned_target(
+        category: str, project: str, model_name: str, version_id: str
+    ) -> None:
+        _validate_target(category, project, model_name)
+        if not VERSION_ID_RE.match(version_id):
+            raise HTTPException(status_code=400, detail=f"invalid version_id: {version_id!r}")
+
+    def _read_channel_versions(
+        store: ReadOnlyArtifactStore,
+        cfg: Settings,
+        bucket: str,
+        project: str,
+        model_name: str,
+    ) -> dict[str, str]:
+        """Read stable/latest pointers; map channel -> version_id. Tolerates missing pointers."""
+        out: dict[str, str] = {}
+        for ch in ("stable", "latest"):
+            try:
+                ptr = store.get_json(bucket, pointer_key(cfg.prefix, project, model_name, ch))
+            except Exception as exc:
+                logger.debug(
+                    "channel '{}' pointer read failed for {}/{}: {}", ch, project, model_name, exc
+                )
+                continue
+            if ptr and ptr.get("version_id"):
+                out[ch] = ptr["version_id"]
+        return out
+
+    # ------------------------------------------------------------------
     # Health / readiness
     # ------------------------------------------------------------------
 
@@ -184,7 +234,11 @@ def create_app(
             missing = [c for c in cols if c not in req.features]
             if missing:
                 raise HTTPException(status_code=422, detail=f"missing features: {missing}")
-        X = _to_matrix([req.features], cols) if cols else [[v for v in req.features.values()]]
+        else:
+            # No declared schema_contract: fix a deterministic column order so the
+            # feature matrix never depends on JSON/dict insertion order.
+            cols = sorted(req.features)
+        X = _to_matrix([req.features], cols)
         try:
             preds = _predict(baked.obj, X, cols)
         except Exception as exc:
@@ -221,7 +275,14 @@ def create_app(
                     raise HTTPException(
                         status_code=422, detail=f"row {i} missing features: {missing}"
                     )
-        X = _to_matrix(req.rows, cols) if cols else [[v for v in r.values()] for r in req.rows]
+        else:
+            # No declared schema_contract: derive a stable, unioned column order so
+            # rows with differing key orders still align into the same columns.
+            seen: dict[str, None] = {}
+            for r in req.rows:
+                seen.update(dict.fromkeys(r))
+            cols = sorted(seen)
+        X = _to_matrix(req.rows, cols)
         try:
             preds = _predict(baked.obj, X, cols)
         except Exception as exc:
@@ -259,10 +320,7 @@ def create_app(
         store: ReadOnlyArtifactStore = Depends(get_store),
         settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
-        if not CATEGORY_RE.match(category):
-            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
-        if not PROJECT_RE.match(project):
-            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
+        _validate_category_project(category, project)
         bucket = settings.bucket_for(category)
         prefix = project_prefix(settings.prefix, project)
 
@@ -286,7 +344,7 @@ def create_app(
                 "registry_version": data.get("registry_version"),
                 "promoted_at": data.get("promoted_at"),
                 "updated_at": data.get("updated_at"),
-                "mlflow_model_url": data.get("mlflow_model_url"),
+                "model_url": data.get("model_url"),
             }
 
         try:
@@ -323,23 +381,9 @@ def create_app(
         settings: Settings = Depends(get_settings),
         store: ReadOnlyArtifactStore = Depends(get_store),
     ) -> dict[str, Any]:
-        if not CATEGORY_RE.match(category):
-            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
-        if not PROJECT_RE.match(project):
-            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
-        if not MODEL_NAME_RE.match(model_name):
-            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
-
+        _validate_target(category, project, model_name)
         bucket = settings.bucket_for(category)
-
-        channel_version: dict[str, str] = {}
-        for ch in ("stable", "latest"):
-            try:
-                ptr = store.get_json(bucket, pointer_key(settings.prefix, project, model_name, ch))
-                if ptr and ptr.get("version_id"):
-                    channel_version[ch] = ptr["version_id"]
-            except Exception:
-                pass
+        channel_version = _read_channel_versions(store, settings, bucket, project, model_name)
 
         root_prefix = model_root(settings.prefix, project, model_name) + "/"
         try:
@@ -392,14 +436,7 @@ def create_app(
         settings: Settings = Depends(get_settings),
         store: ReadOnlyArtifactStore = Depends(get_store),
     ) -> dict[str, Any]:
-        if not CATEGORY_RE.match(category):
-            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
-        if not PROJECT_RE.match(project):
-            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
-        if not MODEL_NAME_RE.match(model_name):
-            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
-        if not VERSION_ID_RE.match(version_id):
-            raise HTTPException(status_code=400, detail=f"invalid version_id: {version_id!r}")
+        _validate_versioned_target(category, project, model_name, version_id)
 
         bucket = settings.bucket_for(category)
         mkey = manifest_key(settings.prefix, project, model_name, version_id)
@@ -410,14 +447,7 @@ def create_app(
                 detail=f"version {version_id} not found for {project}/{model_name}",
             )
 
-        channel_version: dict[str, str] = {}
-        for ch in ("stable", "latest"):
-            try:
-                ptr = store.get_json(bucket, pointer_key(settings.prefix, project, model_name, ch))
-                if ptr and ptr.get("version_id"):
-                    channel_version[ch] = ptr["version_id"]
-            except Exception:
-                pass
+        channel_version = _read_channel_versions(store, settings, bucket, project, model_name)
         channels = [ch for ch, v in channel_version.items() if v == version_id]
 
         sc = manifest_data.get("schema_contract") or {}
@@ -439,25 +469,14 @@ def create_app(
             ),
             "channels": channels,
             "published_at": manifest_data.get("published_at"),
-            "mlflow_run_url": manifest_data.get("mlflow_run_url"),
-            "mlflow_model_url": manifest_data.get("mlflow_model_url"),
+            "run_url": manifest_data.get("run_url"),
+            "model_url": manifest_data.get("model_url"),
             "bucket": bucket,
         }
 
     # ------------------------------------------------------------------
     # Training trigger — storage port used here too (GCP-swappable)
     # ------------------------------------------------------------------
-
-    def _validate_category_project(category: str, project: str) -> None:
-        if not CATEGORY_RE.match(category):
-            raise HTTPException(status_code=400, detail=f"invalid category: {category!r}")
-        if not PROJECT_RE.match(project):
-            raise HTTPException(status_code=400, detail=f"invalid project: {project!r}")
-
-    def _validate_target(category: str, project: str, model_name: str) -> None:
-        _validate_category_project(category, project)
-        if not MODEL_NAME_RE.match(model_name):
-            raise HTTPException(status_code=400, detail=f"invalid model_name: {model_name!r}")
 
     @app.post("/trigger-train")
     async def trigger_train(
@@ -567,13 +586,15 @@ def create_app(
                     ptr_raw = store.get_json(
                         bucket, pointer_key(settings.prefix, project, mn, "stable")
                     )
-                    if ptr_raw and ptr_raw.get("manifest_uri"):
-                        manifest_uri: str = ptr_raw["manifest_uri"]
-                        resp["version_id"] = ptr_raw.get("version_id")
-                        resp["manifest_uri"] = manifest_uri
-                        resp["model_pkl_uri"] = manifest_uri.replace("/manifest.json", "/model.pkl")
-                except Exception:
-                    pass
+                    version_id = (ptr_raw or {}).get("version_id")
+                    if version_id:
+                        mkey = manifest_key(settings.prefix, project, mn, version_id)
+                        pkey = model_pkl_key(settings.prefix, project, mn, version_id)
+                        resp["version_id"] = version_id
+                        resp["manifest_uri"] = f"s3://{bucket}/{mkey}"
+                        resp["model_pkl_uri"] = f"s3://{bucket}/{pkey}"
+                except Exception as exc:
+                    logger.debug("stable pointer lookup failed for {}/{}: {}", project, mn, exc)
             return resp
 
         if running is not None:

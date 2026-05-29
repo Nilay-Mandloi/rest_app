@@ -20,6 +20,7 @@ from rest_app.layout import (
     trigger_failure_key,
     trigger_metadata_key,
     trigger_params_key,
+    trigger_root,
 )
 from rest_app.ports.orchestration import OrchestrationAdapter
 from rest_app.ports.storage import ArtifactStore
@@ -56,6 +57,15 @@ def _full_uri(bucket: str, logical_key: str) -> str:
     or trigger.json will record a doubled-prefix URI that the puller 404s on.
     """
     return f"s3://{bucket}/{logical_key}"
+
+
+def _delete_best_effort(store: ArtifactStore, bucket: str, keys: list[str], context: str) -> None:
+    """Delete keys in reverse order; log but do not raise on individual failures."""
+    for key in reversed(keys):
+        try:
+            store.delete(bucket, key)
+        except Exception as cleanup_exc:
+            logger.warning("Failed to clean up orphaned key {} ({}): {}", key, context, cleanup_exc)
 
 
 def publish_trigger(
@@ -129,15 +139,10 @@ def publish_trigger(
         )
         uploaded.append(metadata_key)
     except Exception:
-        for key in reversed(uploaded):
-            try:
-                store.delete(bucket, key)
-            except Exception as cleanup_exc:
-                logger.warning("Failed to clean up orphaned key {}: {}", key, cleanup_exc)
+        _delete_best_effort(store, bucket, uploaded, "upload failure")
         raise
 
-    prefix_part = f"{prefix.strip('/')}/" if prefix.strip("/") else ""
-    trigger_uri = f"s3://{bucket}/{prefix_part}_triggers/{project}/{trigger_id}/"
+    trigger_uri = f"s3://{bucket}/{trigger_root(prefix, project, trigger_id)}/"
     logger.info(
         "Published trigger {} ({}/{}, format={}) -> {}",
         trigger_id,
@@ -148,7 +153,10 @@ def publish_trigger(
     )
 
     # Hand off to the orchestrator. If it refuses, write a failed.json marker
-    # so /trigger-status/<id> reports "failed" instead of hanging in "pending".
+    # so /trigger-status/<id> reports "failed" instead of hanging in "pending",
+    # then delete the dataset/params/trigger.json since this trigger_id is
+    # single-use (server-generated) and will never be retried — leaving the
+    # data behind only accumulates orphans in S3.
     try:
         orchestrator.dispatch_training(
             trigger_id=trigger_id,
@@ -180,6 +188,7 @@ def publish_trigger(
                 trigger_id,
                 marker_exc,
             )
+        _delete_best_effort(store, bucket, uploaded, "dispatch failure")
         raise
 
     return trigger_id, trigger_uri

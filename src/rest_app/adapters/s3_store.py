@@ -13,6 +13,7 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
+from loguru import logger
 
 from rest_app.ports.storage import ArtifactStore, ReadOnlyArtifactStore
 
@@ -30,7 +31,11 @@ class S3ReadStore(ReadOnlyArtifactStore):
             if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
                 return None
             raise
-        return json.loads(resp["Body"].read())
+        body = resp["Body"].read()
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"s3://{bucket}/{logical_key} is not valid JSON: {exc}") from exc
 
     def download_file(self, bucket: str, logical_key: str, local_path: Path | str) -> None:
         self._client.download_file(bucket, logical_key, str(local_path))
@@ -78,8 +83,10 @@ class S3Store(S3ReadStore, ArtifactStore):
         self._client.put_object(**kwargs)
 
     def delete(self, bucket: str, logical_key: str) -> None:
+        # Best-effort cleanup: a failed delete must not mask the caller's
+        # original error, but it should never vanish silently either.
         try:
             self._client.delete_object(Bucket=bucket, Key=logical_key)
-        except ClientError:
-            # Best-effort cleanup — surface only via caller's logger
-            pass
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            logger.warning("s3 delete failed for s3://{}/{} ({})", bucket, logical_key, code or exc)

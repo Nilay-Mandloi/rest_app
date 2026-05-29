@@ -22,8 +22,12 @@ class OrchestrationAdapter(ABC):
     ) -> None:
         """Kick off a training run for trigger_id.
 
-        Implementations should be idempotent w.r.t. trigger_id — calling twice
-        with the same id MUST NOT enqueue two runs.
+        Note on idempotency: ``trigger_id`` is generated server-side per
+        request by the publisher, so duplicate dispatches do not occur in the
+        normal request flow. Concrete adapters (e.g. GitHub
+        ``repository_dispatch``) do NOT deduplicate at the API level — a
+        second call with the same trigger_id WILL enqueue a second run.
+        Callers must therefore not retry dispatch with the same trigger_id.
 
         Raise RuntimeError when the orchestrator refuses the request (auth,
         rate-limit, persistent failure). Callers treat that as a hard failure

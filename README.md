@@ -61,6 +61,12 @@ curl -X POST http://localhost:8000/predict \
 If the manifest declares `feature_columns`, requests missing any of them get a
 `422` listing the missing names.
 
+The body accepts **only** `features` — the image bakes exactly one model, so
+which model/version to serve is a build-time choice. Any extra field (e.g.
+`version`, `project`) is rejected with `422`; check `GET /model/info` for the
+served version. To serve a different version, build an image from it (pick
+`model_version` in `deploy.yml`).
+
 ### `/trigger-train`
 
 Uploads a dataset and a `params.yaml`, writes the trigger folder to S3 in the
