@@ -81,15 +81,18 @@ jobs:
     uses: ./.github/workflows/trigger-train.yml
     with:
       rest_app_url: ${{ inputs.rest_app_url }}
-      dataset_path: ${{ inputs.dataset_path }}
-      params_path:  ${{ inputs.params_path }}
+      dataset_s3_uri: ${{ inputs.dataset_path }}
+      params_s3_uri:  ${{ inputs.params_path }}
       project:      ${{ inputs.project }}
       model_name:   ${{ inputs.model_name }}
       category:     ${{ inputs.category }}
       model_family: ${{ inputs.model_family }}
       auto_promote: ${{ inputs.auto_promote }}
     secrets:
-      admin_token: ${{ secrets.REST_APP_ADMIN_TOKEN }}
+      admin_token:           ${{ secrets.REST_APP_ADMIN_TOKEN }}
+      aws_access_key_id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      aws_default_region:    ${{ secrets.AWS_DEFAULT_REGION }}
 
   # ── Job 2: build image with baked model, ship to EC2 ──────────────────────
   # Runs always — after training succeeds, or immediately when training is skipped.

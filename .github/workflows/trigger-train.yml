@@ -7,12 +7,15 @@
 #       uses: Nilay-Mandloi/rest_app/.github/workflows/trigger-train.yml@main
 #       with:
 #         rest_app_url: https://your-rest-app-server
-#         dataset_path: data/sales.parquet
-#         params_path: configs/params.yaml
+#         dataset_s3_uri: s3://bucket/path/dataset.parquet
+#         params_s3_uri: s3://bucket/path/params.yaml
 #         project: product_dq
 #         model_name: sales_forecasting
 #       secrets:
 #         admin_token: ${{ secrets.REST_APP_ADMIN_TOKEN }}
+#         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
 #
 # Outputs:
 #   trigger_id     — the trigger ID assigned to this run
@@ -27,12 +30,12 @@ on:
         description: "rest_app base URL (e.g. https://your-server)"
         required: true
         type: string
-      dataset_path:
-        description: "Path to dataset file relative to repo root (.csv or .parquet)"
+      dataset_s3_uri:
+        description: "S3 URI for the dataset file (s3://bucket/key.parquet or .csv)"
         required: true
         type: string
-      params_path:
-        description: "Path to params.yaml relative to repo root"
+      params_s3_uri:
+        description: "S3 URI for params.yaml (s3://bucket/key.yaml)"
         required: true
         type: string
       project:
@@ -67,6 +70,15 @@ on:
       admin_token:
         required: true
         description: "Value of APP_ADMIN_TOKEN set on the rest_app server"
+      aws_access_key_id:
+        required: true
+        description: "AWS access key for downloading dataset and params from S3"
+      aws_secret_access_key:
+        required: true
+        description: "AWS secret key for downloading dataset and params from S3"
+      aws_default_region:
+        required: true
+        description: "AWS region (e.g. ap-south-1)"
     outputs:
       trigger_id:
         description: "Trigger ID for this run"
@@ -85,12 +97,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Step 1: upload dataset + params and fire the trigger ──────────────
+      # ── Step 1: download dataset + params from S3, then fire the trigger ────
       - name: Trigger training run
         id: fire
         env:
           ADMIN_TOKEN: ${{ secrets.admin_token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key }}
+          AWS_DEFAULT_REGION: ${{ secrets.aws_default_region }}
         run: |
+          aws s3 cp "${{ inputs.dataset_s3_uri }}" /tmp/dataset_file
+          aws s3 cp "${{ inputs.params_s3_uri }}"  /tmp/params_file.yaml
+
           RESPONSE=$(curl -sf \
             -X POST "${{ inputs.rest_app_url }}/trigger-train" \
             -H "X-Admin-Token: $ADMIN_TOKEN" \
@@ -99,8 +117,8 @@ jobs:
             -F "model_name=${{ inputs.model_name }}" \
             -F "model_family=${{ inputs.model_family }}" \
             -F "auto_promote=${{ inputs.auto_promote }}" \
-            -F "dataset=@${{ inputs.dataset_path }}" \
-            -F "params=@${{ inputs.params_path }}")
+            -F "dataset=@/tmp/dataset_file" \
+            -F "params=@/tmp/params_file.yaml")
           echo "trigger_id=$(echo "$RESPONSE" | jq -r '.trigger_id')" >> "$GITHUB_OUTPUT"
           echo "Trigger ID: $(echo "$RESPONSE" | jq -r '.trigger_id')"
           echo "Status URL: ${{ inputs.rest_app_url }}$(echo "$RESPONSE" | jq -r '.status_url')"
