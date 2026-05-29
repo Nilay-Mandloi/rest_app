@@ -29,6 +29,7 @@ class Settings:
     # Training trigger (/trigger-train). Both empty => endpoint returns 503.
     training_repo: str
     training_repo_token: str
+    training_branch: str   # branch/ref to run train.yaml on (default: main)
     training_auto_promote: bool
     # Bound on dataset upload size (bytes). Default 100 MB.
     max_dataset_bytes: int
@@ -51,6 +52,7 @@ class Settings:
         manifest_path = os.environ.get("MANIFEST_PATH", "/app/manifest.json").strip()
         training_repo = os.environ.get("GITHUB_TRAINING_REPO", "").strip()
         training_repo_token = os.environ.get("GITHUB_PAT", "").strip()
+        training_branch = os.environ.get("GITHUB_TRAINING_BRANCH", "main").strip() or "main"
         training_auto_promote = os.environ.get("TRAINING_AUTO_PROMOTE", "").strip().lower() in {
             "1",
             "true",
@@ -72,6 +74,7 @@ class Settings:
             manifest_path=manifest_path,
             training_repo=training_repo,
             training_repo_token=training_repo_token,
+            training_branch=training_branch,
             training_auto_promote=training_auto_promote,
             max_dataset_bytes=max_dataset_bytes,
         )

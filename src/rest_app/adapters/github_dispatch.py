@@ -25,6 +25,7 @@ class GitHubDispatchAdapter(OrchestrationAdapter):
         *,
         training_repo: str,
         training_repo_token: str,
+        training_branch: str = "main",
         timeout_s: int = 10,
         retry_pause_s: int = 2,
     ) -> None:
@@ -32,6 +33,7 @@ class GitHubDispatchAdapter(OrchestrationAdapter):
             raise ValueError("training_repo and training_repo_token are both required")
         self._repo = training_repo
         self._token = training_repo_token
+        self._branch = training_branch or "main"
         self._timeout_s = timeout_s
         self._retry_pause_s = retry_pause_s
 
@@ -46,13 +48,16 @@ class GitHubDispatchAdapter(OrchestrationAdapter):
         prefix: str,
         auto_promote: bool,
     ) -> None:
-        url = f"https://api.github.com/repos/{self._repo}/dispatches"
+        # workflow_dispatch lets us target a specific branch (ref); repository_dispatch
+        # is locked to the default branch and cannot be redirected.
+        url = f"https://api.github.com/repos/{self._repo}/actions/workflows/train.yaml/dispatches"
         payload = json.dumps(
             {
-                "event_type": "train-model",
-                "client_payload": {
+                "ref": self._branch,
+                "inputs": {
+                    "source": "rest_app",
                     "trigger_id": trigger_id,
-                    "auto_promote": auto_promote,
+                    "auto_promote": str(auto_promote).lower(),
                     "category": category,
                     "project": project,
                     "model_name": model_name,

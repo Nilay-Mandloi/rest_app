@@ -62,6 +62,7 @@ def get_orchestrator(settings: Settings) -> OrchestrationAdapter:
         return GitHubDispatchAdapter(
             training_repo=settings.training_repo,
             training_repo_token=settings.training_repo_token,
+            training_branch=settings.training_branch,
         )
     if backend == "noop":
         from rest_app.adapters.github_dispatch import NoopDispatchAdapter
